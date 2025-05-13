@@ -1,0 +1,52 @@
+
+
+
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head>
+    <title>Books</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            padding: 30px;
+            background-color: #f8f9fa;
+        }
+        h2 {
+            color: #343a40;
+        }
+        .book {
+            background: white;
+            padding: 15px;
+            margin: 10px 0;
+            border-radius: 8px;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        button {
+            background-color: #007bff;
+            border: none;
+            padding: 8px 12px;
+            color: white;
+            border-radius: 5px;
+            cursor: pointer;
+        }
+        a {
+            margin-right: 15px;
+            color: #007bff;
+            text-decoration: none;
+        }
+    </style>
+</head>
+<body>
+<h2>Available Books</h2>
+<div th:each="book : ${books}" class="book">
+    <p><strong th:text="${book.title}"></strong> by <span th:text="${book.author}"></span> - <span th:text="${book.price} + ' $'"></span></p>
+    <form th:action="@{/cart/add}" method="post">
+        <input type="hidden" name="title" th:value="${book.title}" />
+        <button type="submit">Add to Cart</button>
+    </form>
+</div>
+<br/>
+<a th:href="@{/cart}">🛒 View Cart</a>
+<a th:href="@{/logout}">🚪 Logout</a>
+</body>
+</html>
