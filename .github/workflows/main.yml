@@ -22,8 +22,9 @@ jobs:
       - name: Run tests
         run: |
           cd bookstore
-          # Use Maven wrapper if available, otherwise use system Maven
+          # Make Maven wrapper executable and use it if available
           if [ -f "./mvnw" ]; then
+            chmod +x ./mvnw
             ./mvnw clean test
           else
             mvn clean test
@@ -46,8 +47,9 @@ jobs:
       - name: Build Project
         run: |
           cd bookstore
-          # Use Maven wrapper if available, otherwise use system Maven
+          # Make Maven wrapper executable and use it if available
           if [ -f "./mvnw" ]; then
+            chmod +x ./mvnw
             ./mvnw clean package -DskipTests
           else
             mvn clean package -DskipTests
