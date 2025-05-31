@@ -23,7 +23,8 @@ jobs:
         run: mvn -f bookstore/pom.xml clean package
 
       - name: Build Docker image
-        run: docker build -t bookstore-app .
+        run: 
+          docker build -t bookstore-app .
 
       - name: Copy docker-compose.yml to server
         uses: appleboy/scp-action@v0.1.6
