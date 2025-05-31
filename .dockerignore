@@ -1,0 +1,33 @@
+# Exclude target directory but allow JAR files
+target/
+!target/*.jar
+
+# Git and documentation
+.git
+.gitignore
+*.md
+README.md
+HELP.md
+
+# IDE files
+.idea
+.vscode
+.settings
+.project
+.classpath
+*.iml
+*.ipr
+*.iws
+
+# Build files (keep JAR though)
+.mvn
+mvnw
+mvnw.cmd
+
+# Docker files
+Dockerfile
+.dockerignore
+
+# Other
+.DS_Store
+*.log
