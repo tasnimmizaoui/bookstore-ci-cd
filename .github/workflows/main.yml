@@ -22,7 +22,12 @@ jobs:
       - name: Run tests
         run: |
           cd bookstore
-          mvn clean test
+          # Use Maven wrapper if available, otherwise use system Maven
+          if [ -f "./mvnw" ]; then
+            ./mvnw clean test
+          else
+            mvn clean test
+          fi
 
   build-and-deploy:
     runs-on: self-hosted
@@ -41,7 +46,12 @@ jobs:
       - name: Build Project
         run: |
           cd bookstore
-          mvn clean package -DskipTests
+          # Use Maven wrapper if available, otherwise use system Maven
+          if [ -f "./mvnw" ]; then
+            ./mvnw clean package -DskipTests
+          else
+            mvn clean package -DskipTests
+          fi
           
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
