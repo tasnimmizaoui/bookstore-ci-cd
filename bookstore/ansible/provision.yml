@@ -1,0 +1,37 @@
+---
+- name: Deploy Bookstore App
+  hosts: web
+  become: true
+  tasks:
+    - name: Update system
+      apt:
+        update_cache: yes
+
+    - name: Install Docker
+      apt:
+        name: docker.io
+        state: present
+
+    - name: Install Docker Compose
+      apt:
+        name: docker-compose
+        state: present
+
+    - name: Create app directory
+      file:
+        path: /home/ubuntu/bookstore
+        state: directory
+        owner: ubuntu
+        mode: '0755'
+
+    - name: Copy project files
+      copy:
+        src: ../
+        dest: /home/ubuntu/bookstore/
+        owner: ubuntu
+        group: ubuntu
+
+    - name: Start Docker containers
+      command: docker-compose up -d
+      args:
+        chdir: /home/ubuntu/bookstore/
