@@ -42,7 +42,7 @@ jobs:
           username: tasnim
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           source: "bookstore/target/bookstore-0.0.1-SNAPSHOT.jar"
-          target: "/home/ubuntu/bookstore/"
+          target: "/home/tasnim/bookstore/"
 
       - name: SSH and deploy Docker Compose
         uses: appleboy/ssh-action@v0.1.6
