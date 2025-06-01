@@ -1,22 +1,26 @@
-name: Build, Test, and Deploy Bookstore App
-
+name: Build, Test, Security Scan, and Deploy Bookstore App
 on:
   push:
     branches:
       - main
+      - develop
   pull_request:
     branches:
       - main
+      - develop
 
 env:
   JAVA_VERSION: '17'
   JAVA_DISTRIBUTION: 'temurin'
   APP_NAME: 'bookstore'
   DEPLOY_PORT: '8080'
+  REGISTRY: 'ghcr.io'
+  IMAGE_NAME: '${{ github.repository }}/bookstore'
 
 jobs:
-  test:
-    name: Run Tests
+  # Code Quality and Security Analysis
+  code-analysis:
+    name: Code Quality & Security Analysis
     runs-on: self-hosted
     
     steps:
@@ -37,16 +41,64 @@ jobs:
           cd ${{ env.APP_NAME }}
           chmod +x ./mvnw
           
-      - name: Verify Maven wrapper
+      # Dependency vulnerability scanning
+      - name: Run OWASP Dependency Check
         run: |
           cd ${{ env.APP_NAME }}
-          ls -la ./mvnw
-          ./mvnw --version
+          ./mvnw org.owasp:dependency-check-maven:check --batch-mode
           
-      - name: Run tests
+      - name: Upload OWASP report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: owasp-report
+          path: ${{ env.APP_NAME }}/target/dependency-check-report.html
+          retention-days: 5
+          
+      # Code quality with SpotBugs
+      - name: Run SpotBugs analysis
         run: |
           cd ${{ env.APP_NAME }}
-          ./mvnw clean test --batch-mode --no-transfer-progress
+          ./mvnw compile spotbugs:check --batch-mode || true
+          
+      # License compliance check
+      - name: License scan
+        run: |
+          cd ${{ env.APP_NAME }}
+          ./mvnw license:check --batch-mode || true
+
+  # Unit and Integration Tests
+  test:
+    name: Run Tests & Code Coverage
+    runs-on: self-hosted
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+          
+      - name: Make Maven wrapper executable
+        run: |
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
+          
+      - name: Run unit tests with coverage
+        run: |
+          cd ${{ env.APP_NAME }}
+          ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
+          
+      - name: Run integration tests
+        run: |
+          cd ${{ env.APP_NAME }}
+          ./mvnw verify -Pintegration-tests --batch-mode --no-transfer-progress || true
           
       - name: Generate test report
         if: always()
@@ -55,12 +107,24 @@ jobs:
           echo "=== Test Results ==="
           if [ -d "target/surefire-reports" ]; then
             find target/surefire-reports -name "*.xml" -exec grep -l "testcase" {} \; | wc -l | xargs echo "Test files found:"
+            echo "Coverage report location: target/site/jacoco/index.html"
           fi
+          
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results
+          path: |
+            ${{ env.APP_NAME }}/target/surefire-reports/
+            ${{ env.APP_NAME }}/target/site/jacoco/
+          retention-days: 5
 
+  # Build Application
   build:
     name: Build Application
     runs-on: self-hosted
-    needs: test
+    needs: [code-analysis, test]
     
     steps:
       - name: Checkout code
@@ -98,10 +162,84 @@ jobs:
           path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
 
+  # Container Security Scanning
+  container-security:
+    name: Container Security Scan
+    runs-on: self-hosted
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar
+          path: ${{ env.APP_NAME }}/target/
+          
+      - name: Build Docker image for scanning
+        run: |
+          echo "Building Docker image for security scanning..."
+          docker build -t ${{ env.APP_NAME }}:scan .
+          
+      - name: Install Trivy
+        run: |
+          # Install Trivy if not already installed
+          if ! command -v trivy &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+            echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update
+            sudo apt-get install trivy -y
+          fi
+          trivy --version
+          
+      - name: Run Trivy vulnerability scanner - Filesystem
+        run: |
+          echo "=== Scanning source code and dependencies ==="
+          trivy fs --format table --exit-code 0 ${{ env.APP_NAME }}/
+          
+      - name: Run Trivy vulnerability scanner - Container Image
+        run: |
+          echo "=== Scanning Docker image ==="
+          trivy image --format table --exit-code 0 ${{ env.APP_NAME }}:scan
+          
+      - name: Run Trivy vulnerability scanner - Generate JSON report
+        run: |
+          echo "=== Generating detailed security report ==="
+          trivy image --format json --output trivy-report.json ${{ env.APP_NAME }}:scan
+          trivy image --format sarif --output trivy-results.sarif ${{ env.APP_NAME }}:scan
+          
+      - name: Upload Trivy scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-results
+          path: |
+            trivy-report.json
+            trivy-results.sarif
+          retention-days: 5
+          
+      # Optional: Fail pipeline on high/critical vulnerabilities
+      - name: Check for critical vulnerabilities
+        run: |
+          echo "=== Checking for critical vulnerabilities ==="
+          # This will exit with code 1 if HIGH or CRITICAL vulnerabilities are found
+          trivy image --exit-code 1 --severity HIGH,CRITICAL ${{ env.APP_NAME }}:scan || {
+            echo "⚠️ High or Critical vulnerabilities found!"
+            echo "Check the detailed report in artifacts"
+            # Uncomment the next line to fail the pipeline on critical vulnerabilities
+            # exit 1
+          }
+
+  # Deploy Application
   deploy:
     name: Deploy Application
     runs-on: self-hosted
-    needs: [test, build]
+    needs: [test, build, container-security]
+    if: github.ref == 'refs/heads/main'  # Only deploy from main branch
     
     steps:
       - name: Checkout code
@@ -128,20 +266,12 @@ jobs:
           echo "=== Docker Compose version ==="
           docker-compose --version || docker compose version
           
-      - name: Stop existing containers
+      - name: Pre-deployment cleanup
         run: |
           echo "Stopping existing containers..."
           docker-compose down --remove-orphans || true
-          
-      - name: Clean up database volume (if needed)
-        run: |
           echo "Cleaning up old database volume..."
           docker volume rm bookstore-ci-cd_db_data || true
-          docker system prune -f || true
-          
-      - name: Clean up old images (optional)
-        run: |
-          cd ${{ env.APP_NAME }}
           echo "Cleaning up old images..."
           docker system prune -f || true
           
@@ -150,95 +280,115 @@ jobs:
           echo "Building and starting containers..."
           docker-compose up -d --build --force-recreate
           
-      - name: Check initial container status
+      - name: Wait for services to be ready
         run: |
-          echo "=== Initial Container Status ==="
-          sleep 5
-          docker-compose ps
+          echo "Waiting for services to start..."
+          sleep 10
           
-          echo ""
-          echo "=== Quick Log Check ==="
-          docker-compose logs app || true
-          
-          # If app container is not running, let's see why
-          if ! docker-compose ps | grep -q "app.*Up"; then
-            echo ""
-            echo "⚠️ Application container is not running. Checking logs..."
-            docker-compose logs app || docker logs $(docker-compose ps -q app) || true
-          fi
-          
-      - name: Wait for application to start
-        run: |
-          echo "Waiting for application to start..."
-          
-          # Wait up to 60 seconds for the application to be ready
-          timeout=60
+          # Wait for database
+          echo "Checking database connectivity..."
+          timeout=30
           counter=0
-          
           while [ $counter -lt $timeout ]; do
-            if docker-compose ps | grep -q "Up"; then
-              echo "Containers are running, checking application health..."
-              sleep 5
-              
-              # Check if application responds
-              if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null || curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
-                echo "✅ Application is responding!"
-                break
-              fi
+            if docker-compose exec -T db pg_isready -U bookstore_user -d bookstore_db; then
+              echo "✅ Database is ready"
+              break
             fi
-            
-            echo "Waiting... ($counter/$timeout)"
             sleep 2
             counter=$((counter + 2))
           done
           
-          if [ $counter -ge $timeout ]; then
-            echo "⚠️ Application may not be fully ready yet"
-          fi
+          # Wait for application
+          echo "Waiting for application to start..."
+          timeout=60
+          counter=0
+          while [ $counter -lt $timeout ]; do
+            if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
+              echo "✅ Application is responding!"
+              break
+            elif curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
+              echo "✅ Application is responding!"
+              break
+            fi
+            echo "Waiting... ($counter/$timeout)"
+            sleep 3
+            counter=$((counter + 3))
+          done
           
-      - name: Deployment status and logs
-        if: always()
+      - name: Deployment verification
         run: |
-          echo "=== Container Status ==="
+          echo "=== Deployment Verification ==="
+          
+          # Container status
+          echo "Container Status:"
           docker-compose ps
           
+          # Resource usage
           echo ""
-          echo "=== Container Resource Usage ==="
+          echo "Resource Usage:"
           docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}" || true
           
+          # Network connectivity test
           echo ""
-          echo "=== Application Logs ==="
-          docker-compose logs app || docker logs bookstore-ci-cd_app_1 || true
+          echo "Network Tests:"
+          curl -s http://localhost:${{ env.DEPLOY_PORT }}/actuator/health | jq '.' || echo "Health endpoint not available"
           
+          # Database connectivity test
           echo ""
-          echo "=== Database Logs ==="
-          docker-compose logs db || docker logs bookstore-ci-cd_db_1 || true
+          echo "Database Connectivity:"
+          docker-compose exec -T db psql -U bookstore_user -d bookstore_db -c "SELECT version();" || echo "Database query failed"
           
-          echo ""
-          echo "=== Docker Compose Services ==="
-          docker-compose config --services || true
-          
-          echo ""
-          echo "=== All Container Logs ==="
-          docker-compose logs || true
-          
-          echo ""
-          echo "✅ Deployment completed!"
-          echo "🌐 Application should be available at:"
-          echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
-          echo "   - http://$(hostname -I | awk '{print $1}'):${{ env.DEPLOY_PORT }}"
-          
-      - name: Health check
+      - name: Final health check
+        if: always()
         run: |
           echo "=== Final Health Check ==="
           
-          # Try health endpoint first, then root endpoint
           if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
             echo "✅ Health endpoint responding"
+            echo "✅ Deployment successful!"
           elif curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
             echo "✅ Application endpoint responding"
+            echo "✅ Deployment successful!"
           else
             echo "⚠️ Application may not be responding on port ${{ env.DEPLOY_PORT }}"
             echo "Container status:"
             docker-compose ps
+            echo ""
+            echo "Application logs:"
+            docker-compose logs app || true
           fi
+          
+          echo ""
+          echo "🌐 Application URLs:"
+          echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
+          echo "   - http://$(hostname -I | awk '{print $1}'):${{ env.DEPLOY_PORT }}"
+
+  # Post-deployment smoke tests
+  smoke-tests:
+    name: Post-Deployment Smoke Tests
+    runs-on: self-hosted
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Basic endpoint tests
+        run: |
+          echo "=== Running Smoke Tests ==="
+          
+          # Test health endpoint
+          if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health; then
+            echo "✅ Health check passed"
+          else
+            echo "❌ Health check failed"
+            exit 1
+          fi
+          
+          # Test main application endpoint
+          if curl -f http://localhost:${{ env.DEPLOY_PORT }}; then
+            echo "✅ Main endpoint accessible"
+          else
+            echo "❌ Main endpoint failed"
+            exit 1
+          fi
+          
+          echo "✅ All smoke tests passed!"
