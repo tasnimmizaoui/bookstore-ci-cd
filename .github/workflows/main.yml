@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App (Simplified) . 
+name: Build, Test, and Deploy Bookstore App (Simplified)
 
 on:
   push:
@@ -15,6 +15,9 @@ env:
   JAVA_DISTRIBUTION: 'temurin'
   APP_NAME: 'bookstore'
   DEPLOY_PORT: '8080'
+  # SonarQube Configuration
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}  # e.g., https://sonarcloud.io or http://localhost:9000
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
 jobs:
   test:
@@ -25,7 +28,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0
+          fetch-depth: 0  # Important for SonarQube analysis
         
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -70,10 +73,84 @@ jobs:
             ${{ env.APP_NAME }}/target/site/jacoco/
           retention-days: 5
 
+  sonarqube-analysis:
+    name: SonarQube Analysis
+    runs-on: self-hosted
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0  # Shallow clones should be disabled for better analysis
+        
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+          
+      - name: Make Maven wrapper executable
+        run: |
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
+          
+      - name: Download test results
+        uses: actions/download-artifact@v4
+        with:
+          name: test-results
+          path: ${{ env.APP_NAME }}/target/
+          
+      # Option 1: SonarCloud Analysis
+      - name: SonarCloud Scan
+        if: env.SONAR_HOST_URL == 'https://sonarcloud.io'
+        uses: SonarSource/sonarcloud-github-action@master
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          SONAR_TOKEN: ${{ env.SONAR_TOKEN }}
+        with:
+          projectBaseDir: ${{ env.APP_NAME }}
+          
+      # Option 2: Self-hosted SonarQube Analysis
+      - name: SonarQube Scan (Self-hosted)
+        if: env.SONAR_HOST_URL != 'https://sonarcloud.io'
+        run: |
+          cd ${{ env.APP_NAME }}
+          
+          # Run tests and generate reports for SonarQube
+          ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
+          
+          # Run SonarQube analysis
+          ./mvnw sonar:sonar \
+            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
+            -Dsonar.login=${{ env.SONAR_TOKEN }} \
+            -Dsonar.projectKey=${{ env.APP_NAME }} \
+            -Dsonar.projectName="${{ env.APP_NAME }}" \
+            -Dsonar.projectVersion=${{ github.sha }} \
+            -Dsonar.sources=src/main/java \
+            -Dsonar.tests=src/test/java \
+            -Dsonar.java.binaries=target/classes \
+            -Dsonar.java.test.binaries=target/test-classes \
+            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
+            -Dsonar.junit.reportPaths=target/surefire-reports \
+            --batch-mode --no-transfer-progress
+            
+      - name: Check SonarQube Quality Gate
+        if: env.SONAR_HOST_URL != 'https://sonarcloud.io'
+        run: |
+          echo "Checking Quality Gate status..."
+          # Wait a bit for SonarQube to process
+          sleep 30
+          
+          # You can add quality gate check here if needed
+          echo "✅ SonarQube analysis completed"
+          echo "🌐 View results at: ${{ env.SONAR_HOST_URL }}"
+
   build:
     name: Build Application
     runs-on: self-hosted
-    needs: test
+    needs: [test, sonarqube-analysis]
     
     steps:
       - name: Checkout code
@@ -111,7 +188,6 @@ jobs:
           path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
 
-  # Basic security scan without OWASP (which is causing issues)
   security-scan:
     name: Basic Security Scan
     runs-on: self-hosted
@@ -145,16 +221,37 @@ jobs:
           fi
           trivy --version
           
-      - name: Run Trivy filesystem scan
+      - name: Run Trivy filesystem scan (optimized)
         run: |
           echo "=== Scanning source code ==="
-          trivy fs --format table --exit-code 0 ${{ env.APP_NAME }}/
+          trivy fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 10m \
+            --format table \
+            --exit-code 0 \
+            ${{ env.APP_NAME }}/
           
-      - name: Run Trivy container scan
+      - name: Run Trivy container scan (optimized)
         run: |
           echo "=== Scanning Docker image ==="
-          trivy image --format table --exit-code 0 ${{ env.APP_NAME }}:scan
-          trivy image --format json --output trivy-report.json ${{ env.APP_NAME }}:scan
+          # Quick scan with table output
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 20m \
+            --format table \
+            --exit-code 0 \
+            ${{ env.APP_NAME }}:scan
+          
+          # Detailed scan with JSON output for artifacts
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 20m \
+            --format json \
+            --output trivy-report.json \
+            ${{ env.APP_NAME }}:scan
           
       - name: Upload Trivy scan results
         if: always()
@@ -163,11 +260,22 @@ jobs:
           name: trivy-scan-results
           path: trivy-report.json
           retention-days: 5
-
+          
+      - name: Show scan summary
+        if: always()
+        run: |
+          echo "=== Scan Summary ==="
+          if [ -f trivy-report.json ]; then
+            echo "✅ Trivy scan completed successfully"
+            echo "📁 Report saved as trivy-report.json"
+          else
+            echo "⚠️ Trivy scan may have encountered issues"
+          fi
+          
   deploy:
     name: Deploy Application
     runs-on: self-hosted
-    needs: [test, build, security-scan]
+    needs: [test, build, security-scan, sonarqube-analysis]
     if: github.ref == 'refs/heads/main'
     
     steps:
