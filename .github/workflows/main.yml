@@ -5,88 +5,209 @@ on:
     branches:
       - main
 
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'temurin'
+  APP_NAME: 'bookstore'
+  DEPLOY_PORT: '8080'
+
 jobs:
   test:
+    name: Run Tests
     runs-on: self-hosted
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
         
-      - name: Set up JDK 17
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
           cache: maven
+          
+      - name: Verify Maven installation
+        run: |
+          mvn --version
           
       - name: Run tests
         run: |
-          cd bookstore
-          # Make Maven wrapper executable and use it if available
-          if [ -f "./mvnw" ]; then
-            chmod +x ./mvnw
-            ./mvnw clean test
-          else
-            mvn clean test
+          cd ${{ env.APP_NAME }}
+          mvn clean test --batch-mode --no-transfer-progress
+          
+      - name: Generate test report
+        if: always()
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "=== Test Results ==="
+          if [ -d "target/surefire-reports" ]; then
+            find target/surefire-reports -name "*.xml" -exec grep -l "testcase" {} \; | wc -l | xargs echo "Test files found:"
           fi
 
-  build-and-deploy:
+  build:
+    name: Build Application
     runs-on: self-hosted
     needs: test
+    
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
         
-      - name: Set up JDK 17
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
         with:
-          java-version: '17'
-          distribution: 'temurin'
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
           cache: maven
           
-      - name: Build Project
+      - name: Verify Maven installation
         run: |
-          cd bookstore
-          # Make Maven wrapper executable and use it if available
-          if [ -f "./mvnw" ]; then
-            chmod +x ./mvnw
-            ./mvnw clean package -DskipTests
-          else
-            mvn clean package -DskipTests
-          fi
+          mvn --version
+          
+      - name: Build application
+        run: |
+          cd ${{ env.APP_NAME }}
+          mvn clean package -DskipTests --batch-mode --no-transfer-progress
+          
+      - name: Verify JAR file
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "=== Built JAR files ==="
+          ls -la target/*.jar
           
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: app-jar
-          path: bookstore/target/*.jar
+          name: ${{ env.APP_NAME }}-jar
+          path: ${{ env.APP_NAME }}/target/*.jar
+          retention-days: 5
+
+  deploy:
+    name: Deploy Application
+    runs-on: self-hosted
+    needs: [test, build]
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+        
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar
+          path: ${{ env.APP_NAME }}/target/
+          
+      - name: Verify downloaded artifacts
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "=== Downloaded artifacts ==="
+          ls -la target/
+          
+      - name: Check Docker and Docker Compose
+        run: |
+          echo "=== Docker version ==="
+          docker --version
+          echo "=== Docker Compose version ==="
+          docker-compose --version || docker compose version
           
       - name: Stop existing containers
         run: |
-          cd bookstore
-          docker-compose down || true
+          cd ${{ env.APP_NAME }}
+          echo "Stopping existing containers..."
+          docker-compose down --remove-orphans || true
+          
+      - name: Clean up old images (optional)
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "Cleaning up old images..."
+          docker system prune -f || true
           
       - name: Build and deploy with Docker Compose
         run: |
-          cd bookstore
-          docker-compose up -d --build
+          cd ${{ env.APP_NAME }}
+          echo "Building and starting containers..."
+          docker-compose up -d --build --force-recreate
           
-      - name: Wait for containers to start
+      - name: Wait for application to start
         run: |
-          echo "Waiting for containers to start..."
-          sleep 15
+          cd ${{ env.APP_NAME }}
+          echo "Waiting for application to start..."
           
-      - name: Check deployment status
+          # Wait up to 60 seconds for the application to be ready
+          timeout=60
+          counter=0
+          
+          while [ $counter -lt $timeout ]; do
+            if docker-compose ps | grep -q "Up"; then
+              echo "Containers are running, checking application health..."
+              sleep 5
+              
+              # Check if application responds
+              if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null || curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
+                echo "✅ Application is responding!"
+                break
+              fi
+            fi
+            
+            echo "Waiting... ($counter/$timeout)"
+            sleep 2
+            counter=$((counter + 2))
+          done
+          
+          if [ $counter -ge $timeout ]; then
+            echo "⚠️ Application may not be fully ready yet"
+          fi
+          
+      - name: Deployment status and logs
+        if: always()
         run: |
-          cd bookstore
+          cd ${{ env.APP_NAME }}
+          
           echo "=== Container Status ==="
           docker-compose ps
+          
           echo ""
-          echo "=== Application Logs ==="
-          docker-compose logs app --tail=20
+          echo "=== Container Resource Usage ==="
+          docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+          
           echo ""
-          echo "=== Database Logs ==="
-          docker-compose logs db --tail=10
+          echo "=== Application Logs (last 30 lines) ==="
+          docker-compose logs app --tail=30
+          
+          echo ""
+          echo "=== Database Logs (last 15 lines) ==="
+          docker-compose logs db --tail=15
+          
+          echo ""
+          echo "=== Network Information ==="
+          docker network ls
+          
           echo ""
           echo "✅ Deployment completed!"
-          echo "🌐 Application should be available at: http://localhost:8080"
+          echo "🌐 Application should be available at:"
+          echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
+          echo "   - http://$(hostname -I | awk '{print $1}'):${{ env.DEPLOY_PORT }}"
+          
+      - name: Health check
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "=== Final Health Check ==="
+          
+          # Try health endpoint first, then root endpoint
+          if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
+            echo "✅ Health endpoint responding"
+          elif curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
+            echo "✅ Application endpoint responding"
+          else
+            echo "⚠️ Application may not be responding on port ${{ env.DEPLOY_PORT }}"
+            echo "Container status:"
+            docker-compose ps
+          fi
