@@ -133,6 +133,12 @@ jobs:
           echo "Stopping existing containers..."
           docker-compose down --remove-orphans || true
           
+      - name: Clean up database volume (if needed)
+        run: |
+          echo "Cleaning up old database volume..."
+          docker volume rm bookstore-ci-cd_db_data || true
+          docker system prune -f || true
+          
       - name: Clean up old images (optional)
         run: |
           cd ${{ env.APP_NAME }}
