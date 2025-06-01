@@ -1,0 +1,25 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head th:replace="fragments/header :: head"></head>
+<body class="d-flex flex-column min-vh-100">
+<nav th:replace="fragments/header :: navbar"></nav>
+<div th:replace="fragments/header :: messages"></div>
+
+<div class="container">
+    <div class="jumbotron bg-light p-5 rounded">
+        <h1 class="display-4" th:text="#{app.welcome}">Welcome to our online bookstore</h1>
+        <p class="lead">
+                <span sec:authorize="!isAuthenticated()">
+                    <a href="/signup" class="btn btn-primary me-2" th:text="#{nav.signup}">Sign Up</a>
+                    <a href="/login" class="btn btn-outline-primary" th:text="#{nav.login}">Login</a>
+                </span>
+            <span sec:authorize="isAuthenticated()">
+                    <a href="/books" class="btn btn-primary" th:text="#{nav.books}">Browse Books</a>
+                </span>
+        </p>
+    </div>
+</div>
+<div class="flex-grow-1"></div>
+<footer th:replace="fragments/footer :: footer"></footer>
+</body>
+</html>

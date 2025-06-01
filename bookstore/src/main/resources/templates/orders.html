@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html xmlns:th="http://www.thymeleaf.org">
+<head th:replace="fragments/header :: head"></head>
+<body class="d-flex flex-column min-vh-100">
+<nav th:replace="fragments/header :: navbar"></nav>
+<div th:replace="fragments/header :: messages"></div>
+<div class="container">
+    <h2 th:text="#{order.title}">Your Orders</h2>
+    <div th:if="${orders.size() == 0}">
+        <p class="alert alert-info mt-3" th:text="#{order.empty}">You don't have any orders yet</p>
+        <a href="/books" class="btn btn-primary" th:text="#{cart.continue}">Continue Shopping</a>
+    </div>
+    <div th:if="${orders.size() > 0}">
+        <div th:each="order : ${orders}" class="card mb-4">
+            <div class="card-header">
+                <span th:text="#{order.date}">Order Date</span>: <span th:text="${#temporals.format(order.orderDate, 'yyyy-MM-dd HH:mm')}">2025-05-11 00:00</span>
+                <span class="float-end" th:text="#{order.total} + ': ' + ${order.totalAmount} + ' TND'">Total: 0.00 TND</span>
+            </div>
+            <div class="card-body">
+                <h5 th:text="#{order.items}">Items</h5>
+                <ul class="list-group">
+                    <li class="list-group-item" th:each="item : ${order.items}">
+                        <strong th:text="${item.book.title}">Book Title</strong>
+                        <span th:text="'x' + ${item.quantity}">x1</span>
+                        <span class="ms-2" th:text="#{book.price} + ': ' + ${item.price} + ' TND'">Prix: 0.00 TND</span>
+                    </li>
+                </ul>
+            </div>
+        </div>
+    </div>
+</div>
+<div class="flex-grow-1"></div>
+<footer th:replace="fragments/footer :: footer"></footer>
+</body>
+</html>

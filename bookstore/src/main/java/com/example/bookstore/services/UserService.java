@@ -1,21 +1,35 @@
 package com.example.bookstore.services;
 
 import com.example.bookstore.models.User;
+import com.example.bookstore.repositories.UserRepository;
+import org.springframework.beans.factory.annotation.Autowired;
+import org.springframework.security.crypto.password.PasswordEncoder;
 import org.springframework.stereotype.Service;
-import java.util.*;
-
-
 
 @Service
 public class UserService {
-    private Map<String, User> userMap = new HashMap<>();
 
-    public void register(User user) {
-        userMap.put(user.getEmail(), user);
-        System.out.println("User registered: " + user.getEmail());
-        System.out.println("Password (encoded): " + user.getPassword());
+    @Autowired
+    private UserRepository userRepository;
+
+    @Autowired
+    private PasswordEncoder passwordEncoder;
+
+    public User registerUser(User user) {
+        // Check if email already exists
+        if (userRepository.existsByEmail(user.getEmail())) {
+            throw new RuntimeException("Email already in use");
+        }
+
+        // Encode password
+        user.setPassword(passwordEncoder.encode(user.getPassword()));
+
+        // Save user
+        return userRepository.save(user);
     }
-    public Optional<User> findByEmail(String email) {
-        return Optional.ofNullable(userMap.get(email));
+
+    public User findByEmail(String email) {
+        return userRepository.findByEmail(email)
+                .orElseThrow(() -> new RuntimeException("User not found"));
     }
 }

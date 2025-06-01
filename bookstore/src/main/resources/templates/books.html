@@ -1,52 +1,84 @@
-
-
-
 <!DOCTYPE html>
-<html xmlns:th="http://www.thymeleaf.org">
-<head>
-    <title>Books</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            padding: 30px;
-            background-color: #f8f9fa;
-        }
-        h2 {
-            color: #343a40;
-        }
-        .book {
-            background: white;
-            padding: 15px;
-            margin: 10px 0;
-            border-radius: 8px;
-            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-        }
-        button {
-            background-color: #007bff;
-            border: none;
-            padding: 8px 12px;
-            color: white;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-        a {
-            margin-right: 15px;
-            color: #007bff;
-            text-decoration: none;
-        }
-    </style>
-</head>
+<html xmlns:th="http://www.thymeleaf.org" xmlns:sec="http://www.thymeleaf.org/extras/spring-security">
+<head th:replace="fragments/header :: head"></head>
+<style>
+    body {
+        background: linear-gradient(135deg, #e3f0ff 0%, #f9f9f9 100%);
+        min-height: 100vh;
+    }
+</style>
 <body>
-<h2>Available Books</h2>
-<div th:each="book : ${books}" class="book">
-    <p><strong th:text="${book.title}"></strong> by <span th:text="${book.author}"></span> - <span th:text="${book.price} + ' $'"></span></p>
-    <form th:action="@{/cart/add}" method="post">
-        <input type="hidden" name="title" th:value="${book.title}" />
-        <button type="submit">Add to Cart</button>
-    </form>
+<nav th:replace="fragments/header :: navbar"></nav>
+<div th:replace="fragments/header :: messages"></div>
+
+<div class="container py-4" style="background: #f8f9fa; border-radius: 12px;">
+    <h2 class="mb-4 text-primary"><i class="bi bi-journal-bookmark me-2"></i><span th:text="#{nav.books}">Livres</span></h2>
+    <div class="row row-cols-1 row-cols-md-3 g-4 mt-3">
+        <div class="col" th:each="book : ${books}">
+            <div class="card h-100 shadow-sm border-0 book-card" style="transition: transform 0.2s;">
+                <div class="card-body">
+                    <h5 class="card-title d-flex align-items-center"><i class="bi bi-book me-2 text-secondary"></i><span th:text="${book.title}">Titre</span></h5>
+                    <h6 class="card-subtitle mb-2 text-muted"><i class="bi bi-person me-1"></i><span th:text="${book.author}">Auteur</span></h6>
+                    <p class="card-text"><i class="bi bi-info-circle me-1"></i><span th:text="${book.description}">Description</span></p>
+                    <p class="card-text mb-1">
+                        <span class="badge bg-success"><span th:text="#{book.price}">Prix</span>: <span th:text="${book.price}"></span> TND</span>
+                    </p>
+                    <p class="card-text">
+                        <span class="badge bg-info text-dark"><i class="bi bi-stack me-1"></i><span th:text="#{book.stock}">Stock</span>: <span th:text="${book.stock}">0</span></span>
+                    </p>
+                </div>
+                <div class="card-footer bg-white border-0" sec:authorize="isAuthenticated()">
+                    <form th:action="@{/cart/add/{id}(id=${book.id})}" method="post">
+                        <div class="input-group mb-2">
+                            <input type="number" name="quantity" class="form-control" value="1" min="1" max="10">
+                            <button type="submit" class="btn btn-outline-primary"><i class="bi bi-cart-plus me-1"></i><span th:text="#{book.addToCart}">Ajouter au panier</span></button>
+                        </div>
+                    </form>
+                </div>
+            </div>
+        </div>
+    </div>
 </div>
-<br/>
-<a th:href="@{/cart}">🛒 View Cart</a>
-<a th:href="@{/logout}">🚪 Logout</a>
+<style>
+    .book-card:hover {
+        transform: translateY(-5px) scale(1.03);
+        box-shadow: 0 4px 24px rgba(0,0,0,0.09);
+    }
+</style>
+
+<footer th:replace="fragments/footer :: footer"></footer>
+<!-- Floating Cart Icon -->
+<a href="/cart" class="btn btn-primary position-fixed" style="top: 50%; right: 32px; z-index: 1000; border-radius: 50%; width: 56px; height: 56px; display: flex; align-items: center; justify-content: center; box-shadow: 0 4px 16px rgba(0,0,0,0.15);">
+    <i class="bi bi-cart3 fs-3"></i>
+</a>
+
+<!-- Toast for Added to Cart -->
+<div class="position-fixed bottom-0 end-0 p-3" style="z-index: 1100;">
+    <div id="cartToast" class="toast align-items-center text-bg-success border-0" role="alert" aria-live="assertive" aria-atomic="true">
+        <div class="d-flex">
+            <div class="toast-body">
+                <i class="bi bi-cart-check me-2"></i><span th:text="#{message.cart.add.success}">Livre ajouté au panier avec succès!</span>
+            </div>
+            <button type="button" class="btn-close btn-close-white me-2 m-auto" data-bs-dismiss="toast" aria-label="Fermer"></button>
+        </div>
+    </div>
+</div>
+
+<script>
+    // Show toast when "Ajouter au panier" is clicked
+    const addToCartForms = document.querySelectorAll('form[action^="/cart/add/"]');
+    addToCartForms.forEach(form => {
+        form.addEventListener('submit', function(e) {
+            setTimeout(() => {
+                const toastEl = document.getElementById('cartToast');
+                if (window.bootstrap && toastEl) {
+                    const toast = new window.bootstrap.Toast(toastEl);
+                    toast.show();
+                }
+            }, 200);
+        });
+    });
+</script>
+
 </body>
 </html>

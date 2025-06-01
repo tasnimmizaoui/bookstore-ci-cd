@@ -1,53 +1,60 @@
 <!DOCTYPE html>
 <html xmlns:th="http://www.thymeleaf.org">
-<head>
-    <title>Your Cart</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            padding: 30px;
-            background-color: #f2f2f2;
-        }
-        .cart-item {
-            margin: 10px 0;
-            background: white;
-            padding: 10px;
-            border-radius: 8px;
-        }
-        .total {
-            font-weight: bold;
-            margin-top: 20px;
-        }
-        button {
-            background-color: #28a745;
-            color: white;
-            border: none;
-            padding: 8px 15px;
-            border-radius: 5px;
-            cursor: pointer;
-        }
-        a {
-            margin-right: 15px;
-            color: #007bff;
-            text-decoration: none;
-        }
-    </style>
-</head>
-<body>
-<h2>Your Cart</h2>
-<div th:each="item : ${cart}" class="cart-item">
-    <p th:text="|${item.book.title} x ${item.quantity} - $${item.totalPrice}|"></p>
+<head th:replace="fragments/header :: head"></head>
+<body class="d-flex flex-column min-vh-100">
+<nav th:replace="fragments/header :: navbar"></nav>
+<div th:replace="fragments/header :: messages"></div>
+<div class="container">
+    <h2 th:text="#{cart.title}">Your Cart</h2>
+    <div th:if="${cart.items.size() == 0}">
+        <p class="alert alert-info mt-3" th:text="#{cart.empty}">Your cart is empty</p>
+        <a href="/books" class="btn btn-primary" th:text="#{cart.continue}">Continue Shopping</a>
+    </div>
+    <div th:if="${cart.items.size() > 0}">
+        <form th:action="@{/cart/clear}" method="post" class="mb-3">
+            <button type="submit" class="btn btn-outline-danger" th:text="#{cart.clear}">Clear Cart</button>
+        </form>
+        <table class="table table-striped">
+            <thead>
+            <tr>
+                <th th:text="#{book.title}">Title</th>
+                <th th:text="#{book.author}">Author</th>
+                <th th:text="#{book.price}">Price</th>
+                <th th:text="#{book.quantity}">Quantity</th>
+                <th>Subtotal</th>
+                <th></th>
+            </tr>
+            </thead>
+            <tbody>
+            <tr th:each="item : ${cart.items}">
+                <td th:text="${item.title}">Book Title</td>
+                <td th:text="${item.author}">Author</td>
+                <td th:text="${item.price} + ' TND'">12.99 TND</td>
+                <td>
+                    <form th:action="@{/cart/update/{id}(id=${item.bookId})}" method="post" class="d-inline">
+                        <input type="number" name="quantity" th:value="${item.quantity}" min="1" max="10" class="form-control d-inline w-auto">
+                        <button type="submit" class="btn btn-outline-primary btn-sm ms-1" th:text="#{cart.update}">Update</button>
+                    </form>
+                </td>
+                <td th:text="${item.subtotal} + ' TND'">12.99 TND</td>
+                <td>
+                    <form th:action="@{/cart/remove/{id}(id=${item.bookId})}" method="post" class="d-inline">
+                        <button type="submit" class="btn btn-outline-danger btn-sm" th:text="#{cart.remove}">Remove</button>
+                    </form>
+                </td>
+            </tr>
+            </tbody>
+        </table>
+        <div class="d-flex justify-content-end">
+            <h4 class="me-3" th:text="#{cart.total}">Total</h4>
+            <h4 th:text="${cart.total} + ' TND'">0.00 TND</h4>
+        </div>
+        <form th:action="@{/orders/place}" method="post" class="mt-3">
+            <button type="submit" class="btn btn-success" th:text="#{cart.checkout}">Checkout</button>
+        </form>
+    </div>
 </div>
-<p class="total">Total: <span th:text="${total}"/></p>
-
-<form th:action="@{/order}" method="post">
-    <button type="submit">Place Order</button>
-</form>
-
-<br/>
-<a href="/books">⬅️ Back to Books</a>
-<form th:action="@{/logout}" method="post" style="display:inline;">
-    <input type="hidden" th:name="${_csrf.parameterName}" th:value="${_csrf.token}" />
-    <button type="submit" class="btn btn-danger">Logout</button>
-</form></body>
+<div class="flex-grow-1"></div>
+<footer th:replace="fragments/footer :: footer"></footer>
+</body>
 </html>
