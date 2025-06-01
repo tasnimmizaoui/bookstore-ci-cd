@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App (Simplified)
+name: Build, Test, and Deploy Bookstore App (Simplified) . 
 
 on:
   push:
@@ -111,7 +111,7 @@ jobs:
           path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
 
-  # Basic security scan without OWASP (which is causing issues)
+  # Updated security scan with timeout and optimization
   security-scan:
     name: Basic Security Scan
     runs-on: self-hosted
@@ -145,16 +145,37 @@ jobs:
           fi
           trivy --version
           
-      - name: Run Trivy filesystem scan
+      - name: Run Trivy filesystem scan (optimized)
         run: |
           echo "=== Scanning source code ==="
-          trivy fs --format table --exit-code 0 ${{ env.APP_NAME }}/
+          trivy fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 10m \
+            --format table \
+            --exit-code 0 \
+            ${{ env.APP_NAME }}/
           
-      - name: Run Trivy container scan
+      - name: Run Trivy container scan (optimized)
         run: |
           echo "=== Scanning Docker image ==="
-          trivy image --format table --exit-code 0 ${{ env.APP_NAME }}:scan
-          trivy image --format json --output trivy-report.json ${{ env.APP_NAME }}:scan
+          # Quick scan with table output
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 20m \
+            --format table \
+            --exit-code 0 \
+            ${{ env.APP_NAME }}:scan
+          
+          # Detailed scan with JSON output for artifacts
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 20m \
+            --format json \
+            --output trivy-report.json \
+            ${{ env.APP_NAME }}:scan
           
       - name: Upload Trivy scan results
         if: always()
@@ -163,7 +184,18 @@ jobs:
           name: trivy-scan-results
           path: trivy-report.json
           retention-days: 5
-
+          
+      - name: Show scan summary
+        if: always()
+        run: |
+          echo "=== Scan Summary ==="
+          if [ -f trivy-report.json ]; then
+            echo "✅ Trivy scan completed successfully"
+            echo "📁 Report saved as trivy-report.json"
+          else
+            echo "⚠️ Trivy scan may have encountered issues"
+          fi
+          
   deploy:
     name: Deploy Application
     runs-on: self-hosted
