@@ -15,9 +15,6 @@ env:
   JAVA_DISTRIBUTION: 'temurin'
   APP_NAME: 'bookstore'
   DEPLOY_PORT: '8080'
-  # SonarQube Configuration
-  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}  # e.g., https://sonarcloud.io or http://localhost:9000
-  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
 
 jobs:
   test:
@@ -28,7 +25,7 @@ jobs:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
-          fetch-depth: 0  # Important for SonarQube analysis
+          fetch-depth: 0
         
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -73,11 +70,10 @@ jobs:
             ${{ env.APP_NAME }}/target/site/jacoco/
           retention-days: 5
 
- 
   build:
     name: Build Application
     runs-on: self-hosted
-    needs: [test]
+    needs: test
     
     steps:
       - name: Checkout code
@@ -115,6 +111,7 @@ jobs:
           path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
 
+  # Basic security scan without OWASP (which is causing issues)
   security-scan:
     name: Basic Security Scan
     runs-on: self-hosted
@@ -148,37 +145,16 @@ jobs:
           fi
           trivy --version
           
-      - name: Run Trivy filesystem scan (optimized)
+      - name: Run Trivy filesystem scan
         run: |
           echo "=== Scanning source code ==="
-          trivy fs \
-            --scanners vuln \
-            --severity HIGH,CRITICAL \
-            --timeout 10m \
-            --format table \
-            --exit-code 0 \
-            ${{ env.APP_NAME }}/
+          trivy fs --format table --exit-code 0 ${{ env.APP_NAME }}/
           
-      - name: Run Trivy container scan (optimized)
+      - name: Run Trivy container scan
         run: |
           echo "=== Scanning Docker image ==="
-          # Quick scan with table output
-          trivy image \
-            --scanners vuln \
-            --severity HIGH,CRITICAL \
-            --timeout 20m \
-            --format table \
-            --exit-code 0 \
-            ${{ env.APP_NAME }}:scan
-          
-          # Detailed scan with JSON output for artifacts
-          trivy image \
-            --scanners vuln \
-            --severity HIGH,CRITICAL \
-            --timeout 20m \
-            --format json \
-            --output trivy-report.json \
-            ${{ env.APP_NAME }}:scan
+          trivy image --format table --exit-code 0 ${{ env.APP_NAME }}:scan
+          trivy image --format json --output trivy-report.json ${{ env.APP_NAME }}:scan
           
       - name: Upload Trivy scan results
         if: always()
@@ -187,22 +163,11 @@ jobs:
           name: trivy-scan-results
           path: trivy-report.json
           retention-days: 5
-          
-      - name: Show scan summary
-        if: always()
-        run: |
-          echo "=== Scan Summary ==="
-          if [ -f trivy-report.json ]; then
-            echo "✅ Trivy scan completed successfully"
-            echo "📁 Report saved as trivy-report.json"
-          else
-            echo "⚠️ Trivy scan may have encountered issues"
-          fi
-          
+
   deploy:
     name: Deploy Application
     runs-on: self-hosted
-    needs: [test, build, security-scan, sonarqube-analysis]
+    needs: [test, build, security-scan]
     if: github.ref == 'refs/heads/main'
     
     steps:
