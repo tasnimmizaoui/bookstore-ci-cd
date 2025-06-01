@@ -4,7 +4,9 @@ on:
   push:
     branches:
       - main
-
+  pull_request:
+    branches:
+      - main
 
 env:
   JAVA_VERSION: '17'
@@ -30,14 +32,21 @@ jobs:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           cache: maven
           
-      - name: Verify Maven installation
+      - name: Make Maven wrapper executable
         run: |
-          mvn --version
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
+          
+      - name: Verify Maven wrapper
+        run: |
+          cd ${{ env.APP_NAME }}
+          ls -la ./mvnw
+          ./mvnw --version
           
       - name: Run tests
         run: |
           cd ${{ env.APP_NAME }}
-          mvn clean test --batch-mode --no-transfer-progress
+          ./mvnw clean test --batch-mode --no-transfer-progress
           
       - name: Generate test report
         if: always()
@@ -66,14 +75,15 @@ jobs:
           distribution: ${{ env.JAVA_DISTRIBUTION }}
           cache: maven
           
-      - name: Verify Maven installation
+      - name: Make Maven wrapper executable
         run: |
-          mvn --version
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
           
       - name: Build application
         run: |
           cd ${{ env.APP_NAME }}
-          mvn clean package -DskipTests --batch-mode --no-transfer-progress
+          ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
           
       - name: Verify JAR file
         run: |
