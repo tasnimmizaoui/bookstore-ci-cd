@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App .
+name: Build, Test, and Deploy Bookstore App
 
 on:
   push:
@@ -130,7 +130,6 @@ jobs:
           
       - name: Stop existing containers
         run: |
-          cd ${{ env.APP_NAME }}
           echo "Stopping existing containers..."
           docker-compose down --remove-orphans || true
           
@@ -142,13 +141,28 @@ jobs:
           
       - name: Build and deploy with Docker Compose
         run: |
-          cd ${{ env.APP_NAME }}
           echo "Building and starting containers..."
           docker-compose up -d --build --force-recreate
           
+      - name: Check initial container status
+        run: |
+          echo "=== Initial Container Status ==="
+          sleep 5
+          docker-compose ps
+          
+          echo ""
+          echo "=== Quick Log Check ==="
+          docker-compose logs app || true
+          
+          # If app container is not running, let's see why
+          if ! docker-compose ps | grep -q "app.*Up"; then
+            echo ""
+            echo "⚠️ Application container is not running. Checking logs..."
+            docker-compose logs app || docker logs $(docker-compose ps -q app) || true
+          fi
+          
       - name: Wait for application to start
         run: |
-          cd ${{ env.APP_NAME }}
           echo "Waiting for application to start..."
           
           # Wait up to 60 seconds for the application to be ready
@@ -179,26 +193,28 @@ jobs:
       - name: Deployment status and logs
         if: always()
         run: |
-          cd ${{ env.APP_NAME }}
-          
           echo "=== Container Status ==="
           docker-compose ps
           
           echo ""
           echo "=== Container Resource Usage ==="
-          docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}"
+          docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}" || true
           
           echo ""
-          echo "=== Application Logs (last 30 lines) ==="
-          docker-compose logs app --tail=30
+          echo "=== Application Logs ==="
+          docker-compose logs app || docker logs bookstore-ci-cd_app_1 || true
           
           echo ""
-          echo "=== Database Logs (last 15 lines) ==="
-          docker-compose logs db --tail=15
+          echo "=== Database Logs ==="
+          docker-compose logs db || docker logs bookstore-ci-cd_db_1 || true
           
           echo ""
-          echo "=== Network Information ==="
-          docker network ls
+          echo "=== Docker Compose Services ==="
+          docker-compose config --services || true
+          
+          echo ""
+          echo "=== All Container Logs ==="
+          docker-compose logs || true
           
           echo ""
           echo "✅ Deployment completed!"
@@ -208,7 +224,6 @@ jobs:
           
       - name: Health check
         run: |
-          cd ${{ env.APP_NAME }}
           echo "=== Final Health Check ==="
           
           # Try health endpoint first, then root endpoint
