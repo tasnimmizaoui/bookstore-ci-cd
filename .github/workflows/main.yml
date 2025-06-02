@@ -108,7 +108,7 @@ jobs:
           cd ${{ env.APP_NAME }}
           ./mvnw sonar:sonar \
             -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
-            -Dsonar.login=${{ env.SONAR_TOKEN }} \
+            -Dsonar.token=${{ env.SONAR_TOKEN }} \
             -Dsonar.projectKey=${{ env.APP_NAME }} \
             -Dsonar.projectName="${{ env.APP_NAME }}" \
             -Dsonar.projectVersion=${{ github.sha }} \
