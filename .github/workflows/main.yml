@@ -16,8 +16,8 @@ env:
   APP_NAME: 'bookstore'
   DEPLOY_PORT: '8080'
   # SonarQube Configuration
-  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}  # e.g., https://sonarcloud.io or http://localhost:9000
-  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+  SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+  SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }} 
 
 jobs:
   test:
