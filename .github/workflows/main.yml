@@ -138,7 +138,7 @@ jobs:
           echo "Cleaning up old database volume..."
           docker volume rm bookstore-ci-cd_db_data || true
           docker system prune -f || true
-          
+
       - name: Clean up old images (optional)
         run: |
           cd ${{ env.APP_NAME }}
