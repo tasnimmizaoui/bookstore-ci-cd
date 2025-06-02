@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App (Simplified) . 
+name: Build, Test, and Deploy Bookstore App (Improved)
 
 on:
   push:
@@ -17,15 +17,40 @@ env:
   DEPLOY_PORT: '8080'
 
 jobs:
+  # Add a cleanup job to run first
+  cleanup:
+    name: Cleanup Runner Environment
+    runs-on: self-hosted
+    
+    steps:
+      - name: Cleanup workspace
+        run: |
+          echo "Cleaning up workspace..."
+          # Clean up any existing processes
+          pkill -f maven || true
+          pkill -f java || true
+          
+          # Clean up workspace
+          rm -rf ${GITHUB_WORKSPACE}/* || true
+          
+          # Clean up docker containers if any
+          docker container prune -f || true
+          docker image prune -f || true
+          
+          echo "Cleanup completed"
+        continue-on-error: true
+
   test:
     name: Run Tests & Code Coverage
     runs-on: self-hosted
+    needs: cleanup
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true  # Force clean checkout
         
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -49,6 +74,7 @@ jobs:
         run: |
           cd ${{ env.APP_NAME }}
           ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
+        timeout-minutes: 15  # Add timeout to prevent hanging
           
       - name: Generate test report
         if: always()
@@ -64,7 +90,7 @@ jobs:
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results
+          name: test-results-${{ github.run_id }}  # Make artifact names unique
           path: |
             ${{ env.APP_NAME }}/target/surefire-reports/
             ${{ env.APP_NAME }}/target/site/jacoco/
@@ -80,6 +106,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
         
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -97,6 +124,7 @@ jobs:
         run: |
           cd ${{ env.APP_NAME }}
           ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
+        timeout-minutes: 10
           
       - name: Verify JAR file
         run: |
@@ -107,11 +135,10 @@ jobs:
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-jar
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
           path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
 
-  # Updated security scan with timeout and optimization
   security-scan:
     name: Basic Security Scan
     runs-on: self-hosted
@@ -120,21 +147,22 @@ jobs:
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
+        with:
+          clean: true
         
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-jar
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
           path: ${{ env.APP_NAME }}/target/
           
       - name: Build Docker image for scanning
         run: |
           echo "Building Docker image for security scanning..."
-          docker build -t ${{ env.APP_NAME }}:scan .
+          docker build -t ${{ env.APP_NAME }}:scan-${{ github.run_id }} .
           
       - name: Install Trivy
         run: |
-          # Install Trivy if not already installed
           if ! command -v trivy &> /dev/null; then
             sudo apt-get update
             sudo apt-get install wget apt-transport-https gnupg lsb-release -y
@@ -145,7 +173,7 @@ jobs:
           fi
           trivy --version
           
-      - name: Run Trivy filesystem scan (optimized)
+      - name: Run Trivy filesystem scan
         run: |
           echo "=== Scanning source code ==="
           trivy fs \
@@ -155,46 +183,32 @@ jobs:
             --format table \
             --exit-code 0 \
             ${{ env.APP_NAME }}/
+        timeout-minutes: 12
           
-      - name: Run Trivy container scan (optimized)
+      - name: Run Trivy container scan
         run: |
           echo "=== Scanning Docker image ==="
-          # Quick scan with table output
-          trivy image \
-            --scanners vuln \
-            --severity HIGH,CRITICAL \
-            --timeout 20m \
-            --format table \
-            --exit-code 0 \
-            ${{ env.APP_NAME }}:scan
-          
-          # Detailed scan with JSON output for artifacts
           trivy image \
             --scanners vuln \
             --severity HIGH,CRITICAL \
             --timeout 20m \
             --format json \
-            --output trivy-report.json \
-            ${{ env.APP_NAME }}:scan
+            --output trivy-report-${{ github.run_id }}.json \
+            ${{ env.APP_NAME }}:scan-${{ github.run_id }}
+        timeout-minutes: 25
           
       - name: Upload Trivy scan results
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: trivy-scan-results
-          path: trivy-report.json
+          name: trivy-scan-results-${{ github.run_id }}
+          path: trivy-report-${{ github.run_id }}.json
           retention-days: 5
           
-      - name: Show scan summary
+      - name: Cleanup scan image
         if: always()
         run: |
-          echo "=== Scan Summary ==="
-          if [ -f trivy-report.json ]; then
-            echo "✅ Trivy scan completed successfully"
-            echo "📁 Report saved as trivy-report.json"
-          else
-            echo "⚠️ Trivy scan may have encountered issues"
-          fi
+          docker rmi ${{ env.APP_NAME }}:scan-${{ github.run_id }} || true
           
   deploy:
     name: Deploy Application
@@ -207,11 +221,12 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
         
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-jar
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
           path: ${{ env.APP_NAME }}/target/
           
       - name: Verify downloaded artifacts
@@ -231,8 +246,9 @@ jobs:
         run: |
           echo "Stopping existing containers..."
           docker-compose down --remove-orphans || true
+        timeout-minutes: 5
           
-      - name: Clean up database volume (if needed)
+      - name: Clean up database volume
         run: |
           echo "Cleaning up old database volume..."
           docker volume rm bookstore-ci-cd_db_data || true
@@ -242,6 +258,7 @@ jobs:
         run: |
           echo "Building and starting containers..."
           docker-compose up -d --build --force-recreate
+        timeout-minutes: 10
           
       - name: Wait for application to start
         run: |
@@ -287,3 +304,24 @@ jobs:
           echo ""
           echo "🌐 Application should be available at:"
           echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
+          
+  # Final cleanup job
+  final-cleanup:
+    name: Final Cleanup
+    runs-on: self-hosted
+    needs: [deploy]
+    if: always()
+    
+    steps:
+      - name: Cleanup artifacts and containers
+        run: |
+          echo "Final cleanup..."
+          # Clean up any remaining containers
+          docker container prune -f || true
+          docker image prune -f || true
+          
+          # Clean up workspace
+          rm -rf ${GITHUB_WORKSPACE}/.git || true
+          
+          echo "Final cleanup completed"
+        continue-on-error: true
