@@ -75,10 +75,6 @@ jobs:
     runs-on: self-hosted
     needs: test
 
-    env:
-      SONAR_HOST_URL: ${{vars.SONAR_HOST_URL}}
-      SONAR_TOKEN: ${{secrets.SONAR_TOKEN}}
-
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -97,36 +93,88 @@ jobs:
           cd ${{ env.APP_NAME }}
           chmod +x ./mvnw
 
-      - name: Download test results
-        uses: actions/download-artifact@v4
-        with:
-          name: test-results
-          path: ${{ env.APP_NAME }}/target/
-
-      - name: SonarQube Scan (Self-hosted)
+      - name: Clean and compile project
         run: |
           cd ${{ env.APP_NAME }}
-          ./mvnw sonar:sonar \
-            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
-            -Dsonar.token=${{ env.SONAR_TOKEN }} \
-            -Dsonar.projectKey=${{ env.APP_NAME }} \
-            -Dsonar.projectName="${{ env.APP_NAME }}" \
-            -Dsonar.projectVersion=${{ github.sha }} \
-            -Dsonar.sources=src/main/java \
-            -Dsonar.tests=src/test/java \
-            -Dsonar.java.binaries=target/classes \
-            -Dsonar.java.test.binaries=target/test-classes \
-            -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml \
-            -Dsonar.junit.reportPaths=target/surefire-reports \
-            --batch-mode --no-transfer-progress
+          echo "=== Cleaning and compiling project ==="
+          ./mvnw clean compile test-compile --batch-mode --no-transfer-progress
+          
+          echo "=== Running tests with coverage ==="
+          ./mvnw test jacoco:report --batch-mode --no-transfer-progress
+          
+          echo "=== Verifying build outputs ==="
+          ls -la target/
+          
+          if [ -d "target/classes" ]; then
+            echo "✅ target/classes exists with $(find target/classes -name "*.class" | wc -l) class files"
+            find target/classes -name "*.class" | head -5
+          else
+            echo "❌ target/classes does not exist - creating empty directory"
+            mkdir -p target/classes
+          fi
+          
+          if [ -d "target/test-classes" ]; then
+            echo "✅ target/test-classes exists with $(find target/test-classes -name "*.class" | wc -l) test class files"
+          else
+            echo "❌ target/test-classes does not exist - creating empty directory"
+            mkdir -p target/test-classes
+          fi
+          
+          if [ -f "target/site/jacoco/jacoco.xml" ]; then
+            echo "✅ JaCoCo coverage report exists"
+          else
+            echo "❌ JaCoCo coverage report missing"
+          fi
+
+      - name: SonarQube Scan (Self-hosted)
+        if: ${{ secrets.SONAR_HOST_URL != 'https://sonarcloud.io' }}
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
+          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
+        run: |
+          cd ${{ env.APP_NAME }}
+          
+          # Set SonarQube properties with conditional binaries
+          SONAR_PROPS="-Dsonar.host.url=$SONAR_HOST_URL"
+          SONAR_PROPS="$SONAR_PROPS -Dsonar.token=$SONAR_TOKEN"
+          SONAR_PROPS="$SONAR_PROPS -Dsonar.projectKey=${{ env.APP_NAME }}"
+          SONAR_PROPS="$SONAR_PROPS -Dsonar.projectName=${{ env.APP_NAME }}"
+          SONAR_PROPS="$SONAR_PROPS -Dsonar.projectVersion=${{ github.sha }}"
+          SONAR_PROPS="$SONAR_PROPS -Dsonar.sources=src/main/java"
+          SONAR_PROPS="$SONAR_PROPS -Dsonar.tests=src/test/java"
+          
+          # Only add binaries if directories exist and contain files
+          if [ -d "target/classes" ] && [ "$(find target/classes -name "*.class" | wc -l)" -gt 0 ]; then
+            SONAR_PROPS="$SONAR_PROPS -Dsonar.java.binaries=target/classes"
+          fi
+          
+          if [ -d "target/test-classes" ] && [ "$(find target/test-classes -name "*.class" | wc -l)" -gt 0 ]; then
+            SONAR_PROPS="$SONAR_PROPS -Dsonar.java.test.binaries=target/test-classes"
+          fi
+          
+          # Add coverage and test reports if they exist
+          if [ -f "target/site/jacoco/jacoco.xml" ]; then
+            SONAR_PROPS="$SONAR_PROPS -Dsonar.coverage.jacoco.xmlReportPaths=target/site/jacoco/jacoco.xml"
+          fi
+          
+          if [ -d "target/surefire-reports" ]; then
+            SONAR_PROPS="$SONAR_PROPS -Dsonar.junit.reportPaths=target/surefire-reports"
+          fi
+          
+          echo "Running SonarQube analysis with properties:"
+          echo "$SONAR_PROPS"
+          
+          ./mvnw sonar:sonar $SONAR_PROPS --batch-mode --no-transfer-progress
 
       - name: Check SonarQube Quality Gate
+        if: ${{ secrets.SONAR_HOST_URL != 'https://sonarcloud.io' }}
+        env:
+          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           echo "Checking Quality Gate status..."
           sleep 30
           echo "✅ SonarQube analysis completed"
           echo "🌐 View results at: $SONAR_HOST_URL"
-
 
   build:
     name: Build Application
