@@ -70,10 +70,14 @@ jobs:
             ${{ env.APP_NAME }}/target/site/jacoco/
           retention-days: 5
 
-   sonarqube-analysis:
+  sonarqube-analysis:
     name: SonarQube Analysis
     runs-on: self-hosted
     needs: test
+
+    env:
+      SONAR_HOST_URL: ${{vars.SONAR_HOST_URL}}
+      SONAR_TOKEN: ${{secrets.SONAR_TOKEN}}
 
     steps:
       - name: Checkout code
@@ -100,16 +104,11 @@ jobs:
           path: ${{ env.APP_NAME }}/target/
 
       - name: SonarQube Scan (Self-hosted)
-        if: ${{ secrets.SONAR_HOST_URL != 'https://sonarcloud.io' }}
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
-          SONAR_TOKEN: ${{ secrets.SONAR_TOKEN }}
         run: |
           cd ${{ env.APP_NAME }}
-          ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
           ./mvnw sonar:sonar \
-            -Dsonar.host.url=$SONAR_HOST_URL \
-            -Dsonar.login=$SONAR_TOKEN \
+            -Dsonar.host.url=${{ env.SONAR_HOST_URL }} \
+            -Dsonar.login=${{ env.SONAR_TOKEN }} \
             -Dsonar.projectKey=${{ env.APP_NAME }} \
             -Dsonar.projectName="${{ env.APP_NAME }}" \
             -Dsonar.projectVersion=${{ github.sha }} \
@@ -122,9 +121,6 @@ jobs:
             --batch-mode --no-transfer-progress
 
       - name: Check SonarQube Quality Gate
-        if: ${{ secrets.SONAR_HOST_URL != 'https://sonarcloud.io' }}
-        env:
-          SONAR_HOST_URL: ${{ secrets.SONAR_HOST_URL }}
         run: |
           echo "Checking Quality Gate status..."
           sleep 30
