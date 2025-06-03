@@ -174,29 +174,18 @@ jobs:
           ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
         timeout-minutes: 10
           
-      - name: Verify and optimize JAR file
+      - name: Verify JAR file
         run: |
           cd ${{ env.APP_NAME }}
           echo "=== Built JAR files ==="
           ls -la target/*.jar
           
-          # Create optimized artifact directory
-          mkdir -p optimized-jar
-          
-          # Copy only the main JAR file (not sources, tests, etc.)
-          cp target/${{ env.APP_NAME }}-*.jar optimized-jar/ 2>/dev/null || cp target/*.jar optimized-jar/
-          
-          echo "=== Optimized JAR directory ==="
-          ls -la optimized-jar/
-          du -sh optimized-jar/
-          
-      - name: Upload JAR artifact (optimized)
+      - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
           name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
-          path: ${{ env.APP_NAME }}/optimized-jar/
+          path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
-          compression-level: 6  # Add compression
 
   security-scan:
     name: Basic Security Scan
