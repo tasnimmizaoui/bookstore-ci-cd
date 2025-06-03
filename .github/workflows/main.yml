@@ -1,12 +1,13 @@
-name: Build, Test, and Deploy Bookstore App
+name: Build, Test, and Deploy Bookstore App (Improved)
 
 on:
   push:
     branches:
-      - main
+      - test
+      
   pull_request:
     branches:
-      - main
+      - test
 
 env:
   JAVA_VERSION: '17'
@@ -15,15 +16,40 @@ env:
   DEPLOY_PORT: '8080'
 
 jobs:
-  test:
-    name: Run Tests
+  # Add a cleanup job to run first
+  cleanup:
+    name: Cleanup Runner Environment
     runs-on: self-hosted
+    
+    steps:
+      - name: Cleanup workspace
+        run: |
+          echo "Cleaning up workspace..."
+          # Clean up any existing processes
+          pkill -f maven || true
+          pkill -f java || true
+          
+          # Clean up workspace
+          rm -rf ${GITHUB_WORKSPACE}/* || true
+          
+          # Clean up docker containers if any
+          docker container prune -f || true
+          docker image prune -f || true
+          
+          echo "Cleanup completed"
+        continue-on-error: true
+
+  test:
+    name: Run Tests & Code Coverage
+    runs-on: self-hosted
+    needs: cleanup
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true  # Force clean checkout
         
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -43,10 +69,11 @@ jobs:
           ls -la ./mvnw
           ./mvnw --version
           
-      - name: Run tests
+      - name: Run tests with coverage
         run: |
           cd ${{ env.APP_NAME }}
-          ./mvnw clean test --batch-mode --no-transfer-progress
+          ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
+        timeout-minutes: 15  # Add timeout to prevent hanging
           
       - name: Generate test report
         if: always()
@@ -55,7 +82,18 @@ jobs:
           echo "=== Test Results ==="
           if [ -d "target/surefire-reports" ]; then
             find target/surefire-reports -name "*.xml" -exec grep -l "testcase" {} \; | wc -l | xargs echo "Test files found:"
+            echo "Coverage report: target/site/jacoco/index.html"
           fi
+          
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: test-results-${{ github.run_id }}  # Make artifact names unique
+          path: |
+            ${{ env.APP_NAME }}/target/surefire-reports/
+            ${{ env.APP_NAME }}/target/site/jacoco/
+          retention-days: 5
 
   build:
     name: Build Application
@@ -67,6 +105,7 @@ jobs:
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
         
       - name: Set up JDK ${{ env.JAVA_VERSION }}
         uses: actions/setup-java@v4
@@ -84,6 +123,7 @@ jobs:
         run: |
           cd ${{ env.APP_NAME }}
           ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
+        timeout-minutes: 10
           
       - name: Verify JAR file
         run: |
@@ -94,25 +134,98 @@ jobs:
       - name: Upload JAR artifact
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-jar
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
           path: ${{ env.APP_NAME }}/target/*.jar
           retention-days: 5
 
+  security-scan:
+    name: Basic Security Scan
+    runs-on: self-hosted
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          clean: true
+        
+      - name: Download JAR artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
+          path: ${{ env.APP_NAME }}/target/
+          
+      - name: Build Docker image for scanning
+        run: |
+          echo "Building Docker image for security scanning..."
+          docker build -t ${{ env.APP_NAME }}:scan-${{ github.run_id }} .
+          
+      - name: Install Trivy
+        run: |
+          if ! command -v trivy &> /dev/null; then
+            sudo apt-get update
+            sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+            echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update
+            sudo apt-get install trivy -y
+          fi
+          trivy --version
+          
+      - name: Run Trivy filesystem scan
+        run: |
+          echo "=== Scanning source code ==="
+          trivy fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 10m \
+            --format table \
+            --exit-code 0 \
+            ${{ env.APP_NAME }}/
+        timeout-minutes: 12
+          
+      - name: Run Trivy container scan
+        run: |
+          echo "=== Scanning Docker image ==="
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 20m \
+            --format json \
+            --output trivy-report-${{ github.run_id }}.json \
+            ${{ env.APP_NAME }}:scan-${{ github.run_id }}
+        timeout-minutes: 25
+          
+      - name: Upload Trivy scan results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: trivy-scan-results-${{ github.run_id }}
+          path: trivy-report-${{ github.run_id }}.json
+          retention-days: 5
+          
+      - name: Cleanup scan image
+        if: always()
+        run: |
+          docker rmi ${{ env.APP_NAME }}:scan-${{ github.run_id }} || true
+          
   deploy:
     name: Deploy Application
     runs-on: self-hosted
-    needs: [test, build]
+    needs: [test, build, security-scan]
+    if: github.ref == 'refs/heads/main'
     
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
         with:
           fetch-depth: 0
+          clean: true
         
       - name: Download JAR artifact
         uses: actions/download-artifact@v4
         with:
-          name: ${{ env.APP_NAME }}-jar
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
           path: ${{ env.APP_NAME }}/target/
           
       - name: Verify downloaded artifacts
@@ -132,46 +245,24 @@ jobs:
         run: |
           echo "Stopping existing containers..."
           docker-compose down --remove-orphans || true
+        timeout-minutes: 5
           
-      - name: Clean up database volume (if needed)
+      - name: Clean up database volume
         run: |
           echo "Cleaning up old database volume..."
           docker volume rm bookstore-ci-cd_db_data || true
-          docker system prune -f || true
-
-      - name: Clean up old images (optional)
-        run: |
-          cd ${{ env.APP_NAME }}
-          echo "Cleaning up old images..."
           docker system prune -f || true
           
       - name: Build and deploy with Docker Compose
         run: |
           echo "Building and starting containers..."
           docker-compose up -d --build --force-recreate
-          
-      - name: Check initial container status
-        run: |
-          echo "=== Initial Container Status ==="
-          sleep 5
-          docker-compose ps
-          
-          echo ""
-          echo "=== Quick Log Check ==="
-          docker-compose logs app || true
-          
-          # If app container is not running, let's see why
-          if ! docker-compose ps | grep -q "app.*Up"; then
-            echo ""
-            echo "⚠️ Application container is not running. Checking logs..."
-            docker-compose logs app || docker logs $(docker-compose ps -q app) || true
-          fi
+        timeout-minutes: 10
           
       - name: Wait for application to start
         run: |
           echo "Waiting for application to start..."
           
-          # Wait up to 60 seconds for the application to be ready
           timeout=60
           counter=0
           
@@ -180,7 +271,6 @@ jobs:
               echo "Containers are running, checking application health..."
               sleep 5
               
-              # Check if application responds
               if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null || curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
                 echo "✅ Application is responding!"
                 break
@@ -196,43 +286,10 @@ jobs:
             echo "⚠️ Application may not be fully ready yet"
           fi
           
-      - name: Deployment status and logs
-        if: always()
-        run: |
-          echo "=== Container Status ==="
-          docker-compose ps
-          
-          echo ""
-          echo "=== Container Resource Usage ==="
-          docker stats --no-stream --format "table {{.Container}}\t{{.CPUPerc}}\t{{.MemUsage}}" || true
-          
-          echo ""
-          echo "=== Application Logs ==="
-          docker-compose logs app || docker logs bookstore-ci-cd_app_1 || true
-          
-          echo ""
-          echo "=== Database Logs ==="
-          docker-compose logs db || docker logs bookstore-ci-cd_db_1 || true
-          
-          echo ""
-          echo "=== Docker Compose Services ==="
-          docker-compose config --services || true
-          
-          echo ""
-          echo "=== All Container Logs ==="
-          docker-compose logs || true
-          
-          echo ""
-          echo "✅ Deployment completed!"
-          echo "🌐 Application should be available at:"
-          echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
-          echo "   - http://$(hostname -I | awk '{print $1}'):${{ env.DEPLOY_PORT }}"
-          
-      - name: Health check
+      - name: Final health check
         run: |
           echo "=== Final Health Check ==="
           
-          # Try health endpoint first, then root endpoint
           if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
             echo "✅ Health endpoint responding"
           elif curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
@@ -242,3 +299,28 @@ jobs:
             echo "Container status:"
             docker-compose ps
           fi
+          
+          echo ""
+          echo "🌐 Application should be available at:"
+          echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
+          
+  # Final cleanup job
+  final-cleanup:
+    name: Final Cleanup
+    runs-on: self-hosted
+    needs: [deploy]
+    if: always()
+    
+    steps:
+      - name: Cleanup artifacts and containers
+        run: |
+          echo "Final cleanup..."
+          # Clean up any remaining containers
+          docker container prune -f || true
+          docker image prune -f || true
+          
+          # Clean up workspace
+          rm -rf ${GITHUB_WORKSPACE}/.git || true
+          
+          echo "Final cleanup completed"
+        continue-on-error: true
