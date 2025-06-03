@@ -1,0 +1,650 @@
+name: Build, Test, and Deploy Bookstore App with Monitoring
+
+on:
+  push:
+    branches:
+      - test
+
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'temurin'
+  APP_NAME: 'bookstore'
+  DEPLOY_PORT: '8080'
+  PROMETHEUS_PORT: '9090'
+  GRAFANA_PORT: '3000'
+  # Local storage paths on self-hosted runner
+  BUILD_CACHE_DIR: '/opt/github-runner-cache'
+  WORKSPACE_CACHE: '/tmp/bookstore-build-${{ github.run_id }}'
+
+jobs:
+  # Cleanup and setup workspace
+  setup:
+    name: Setup Build Environment
+    runs-on: self-hosted
+    
+    steps:
+      - name: Cleanup and prepare environment
+        run: |
+          echo "🧹 Cleaning up environment..."
+          echo "Current user: $(whoami)"
+          echo "Build ID: ${{ github.run_id }}"
+          
+          # Create build cache directory structure
+          sudo mkdir -p ${{ env.BUILD_CACHE_DIR }}/{builds,tests,scans} || mkdir -p ${{ env.BUILD_CACHE_DIR }}/{builds,tests,scans}
+          sudo chown -R $(whoami):$(whoami) ${{ env.BUILD_CACHE_DIR }} 2>/dev/null || chown -R $(whoami):$(whoami) ${{ env.BUILD_CACHE_DIR }} 2>/dev/null || true
+          
+          # Create workspace cache
+          mkdir -p ${{ env.WORKSPACE_CACHE }}
+          
+          # Clean up any existing processes
+          echo "Stopping existing processes..."
+          pkill -f maven 2>/dev/null || echo "No maven processes found"
+          pkill -f java 2>/dev/null || echo "No java processes found"
+          sleep 2
+          
+          # Clean up workspace files
+          echo "Cleaning workspace files..."
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            find ${GITHUB_WORKSPACE} -mindepth 1 -delete 2>/dev/null || {
+              echo "Cleaning accessible files only..."
+              find ${GITHUB_WORKSPACE} -type f -user $(whoami) -delete 2>/dev/null || true
+              find ${GITHUB_WORKSPACE} -type d -empty -user $(whoami) -delete 2>/dev/null || true
+            }
+          fi
+          
+          # Clean up docker resources
+          echo "Cleaning up Docker resources..."
+          if command -v docker &> /dev/null && docker info &> /dev/null 2>&1; then
+            docker container prune -f 2>/dev/null || echo "Docker container cleanup skipped"
+            docker image prune -f 2>/dev/null || echo "Docker image cleanup skipped"
+            docker volume prune -f 2>/dev/null || echo "Docker volume cleanup skipped"
+          fi
+          
+          echo "✅ Environment setup completed"
+          echo "Cache directory: ${{ env.BUILD_CACHE_DIR }}"
+          echo "Workspace cache: ${{ env.WORKSPACE_CACHE }}"
+        continue-on-error: true
+
+  test:
+    name: Run Tests & Code Coverage
+    runs-on: self-hosted
+    needs: setup
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+        
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+          
+      - name: Make Maven wrapper executable
+        run: |
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
+          
+      - name: Run tests with coverage
+        run: |
+          cd ${{ env.APP_NAME }}
+          ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
+        timeout-minutes: 15
+          
+      - name: Store test results locally
+        if: always()
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "📊 Storing test results locally..."
+          
+          # Create test results directory in cache
+          TEST_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/tests/${{ github.run_id }}"
+          mkdir -p ${TEST_CACHE_DIR}
+          
+          if [ -d "target/surefire-reports" ]; then
+            # Copy test results
+            cp -r target/surefire-reports ${TEST_CACHE_DIR}/
+            
+            # Create test summary
+            echo "=== Test Results Summary ===" > ${TEST_CACHE_DIR}/test-summary.txt
+            echo "Build ID: ${{ github.run_id }}" >> ${TEST_CACHE_DIR}/test-summary.txt
+            echo "Timestamp: $(date)" >> ${TEST_CACHE_DIR}/test-summary.txt
+            echo "Branch: ${{ github.ref_name }}" >> ${TEST_CACHE_DIR}/test-summary.txt
+            echo "Commit: ${{ github.sha }}" >> ${TEST_CACHE_DIR}/test-summary.txt
+            
+            # Extract test metrics
+            test_files=$(find target/surefire-reports -name "*.xml" -exec grep -l "testcase" {} \; | wc -l)
+            echo "Test files: $test_files" >> ${TEST_CACHE_DIR}/test-summary.txt
+            
+            # Store coverage data if available
+            if [ -d "target/site/jacoco" ]; then
+              cp -r target/site/jacoco ${TEST_CACHE_DIR}/
+              echo "Coverage report: Available" >> ${TEST_CACHE_DIR}/test-summary.txt
+            fi
+            
+            echo "✅ Test results stored in: ${TEST_CACHE_DIR}"
+            echo "Test summary:"
+            cat ${TEST_CACHE_DIR}/test-summary.txt
+          else
+            echo "⚠️ No test results found"
+          fi
+          
+          # Store cache location for next job
+          echo "TEST_CACHE_DIR=${TEST_CACHE_DIR}" >> $GITHUB_ENV
+
+  build:
+    name: Build Application
+    runs-on: self-hosted
+    needs: test
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+        
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+          cache: maven
+          
+      - name: Make Maven wrapper executable
+        run: |
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
+          
+      - name: Build application
+        run: |
+          cd ${{ env.APP_NAME }}
+          ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
+        timeout-minutes: 10
+          
+      - name: Store JAR locally
+        run: |
+          cd ${{ env.APP_NAME }}
+          echo "📦 Storing JAR file locally..."
+          
+          # Create build cache directory
+          BUILD_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/builds/${{ github.run_id }}"
+          mkdir -p ${BUILD_CACHE_DIR}
+          
+          if [ -f target/*.jar ]; then
+            # Copy JAR files
+            cp target/*.jar ${BUILD_CACHE_DIR}/
+            
+            # Create build info
+            echo "=== Build Information ===" > ${BUILD_CACHE_DIR}/build-info.txt
+            echo "Build ID: ${{ github.run_id }}" >> ${BUILD_CACHE_DIR}/build-info.txt
+            echo "Timestamp: $(date)" >> ${BUILD_CACHE_DIR}/build-info.txt
+            echo "Branch: ${{ github.ref_name }}" >> ${BUILD_CACHE_DIR}/build-info.txt
+            echo "Commit: ${{ github.sha }}" >> ${BUILD_CACHE_DIR}/build-info.txt
+            
+            echo "JAR files:" >> ${BUILD_CACHE_DIR}/build-info.txt
+            ls -la target/*.jar >> ${BUILD_CACHE_DIR}/build-info.txt
+            
+            echo "✅ JAR stored in: ${BUILD_CACHE_DIR}"
+            echo "Build info:"
+            cat ${BUILD_CACHE_DIR}/build-info.txt
+          else
+            echo "❌ No JAR files found to store"
+            exit 1
+          fi
+          
+          # Store cache location for next job
+          echo "BUILD_CACHE_DIR=${BUILD_CACHE_DIR}" >> $GITHUB_ENV
+
+  security-scan:
+    name: Basic Security Scan
+    runs-on: self-hosted
+    needs: build
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          clean: true
+        
+      - name: Load JAR from cache
+        run: |
+          echo "📥 Loading JAR from local cache..."
+          BUILD_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/builds/${{ github.run_id }}"
+          
+          if [ -d "${BUILD_CACHE_DIR}" ]; then
+            cd ${{ env.APP_NAME }}
+            mkdir -p target
+            cp ${BUILD_CACHE_DIR}/*.jar target/
+            
+            echo "✅ JAR loaded from cache:"
+            ls -la target/
+          else
+            echo "❌ Build cache not found: ${BUILD_CACHE_DIR}"
+            exit 1
+          fi
+          
+      - name: Build Docker image for scanning
+        run: |
+          echo "🐳 Building Docker image for security scanning..."
+          # Ensure we have the right JAR file name
+          cd ${{ env.APP_NAME }}
+          if [ ! -f target/app.jar ]; then
+            cp target/*.jar target/app.jar 2>/dev/null || echo "Warning: Could not standardize JAR name"
+          fi
+          
+          docker build -t ${{ env.APP_NAME }}:scan-${{ github.run_id }} .
+          
+      - name: Install Trivy
+        run: |
+          if ! command -v trivy &> /dev/null; then
+            echo "Installing Trivy..."
+            sudo apt-get update
+            sudo apt-get install wget apt-transport-https gnupg lsb-release -y
+            wget -qO - https://aquasecurity.github.io/trivy-repo/deb/public.key | sudo apt-key add -
+            echo "deb https://aquasecurity.github.io/trivy-repo/deb $(lsb_release -sc) main" | sudo tee -a /etc/apt/sources.list.d/trivy.list
+            sudo apt-get update
+            sudo apt-get install trivy -y
+          fi
+          trivy --version
+          
+      - name: Run security scans and store locally
+        run: |
+          echo "🔒 Running security scans..."
+          
+          # Create scan cache directory
+          SCAN_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/scans/${{ github.run_id }}"
+          mkdir -p ${SCAN_CACHE_DIR}
+          
+          # Filesystem scan
+          echo "Scanning filesystem..."
+          trivy fs \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 10m \
+            --format json \
+            --output ${SCAN_CACHE_DIR}/filesystem-scan.json \
+            ${{ env.APP_NAME }}/ || echo "Filesystem scan completed with warnings"
+          
+          # Container scan
+          echo "Scanning container image..."
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 15m \
+            --format json \
+            --output ${SCAN_CACHE_DIR}/container-scan.json \
+            ${{ env.APP_NAME }}:scan-${{ github.run_id }} || echo "Container scan completed with warnings"
+          
+          # Create scan summary
+          echo "=== Security Scan Summary ===" > ${SCAN_CACHE_DIR}/scan-summary.txt
+          echo "Build ID: ${{ github.run_id }}" >> ${SCAN_CACHE_DIR}/scan-summary.txt
+          echo "Timestamp: $(date)" >> ${SCAN_CACHE_DIR}/scan-summary.txt
+          echo "Branch: ${{ github.ref_name }}" >> ${SCAN_CACHE_DIR}/scan-summary.txt
+          
+          # Extract vulnerability counts
+          if [ -f "${SCAN_CACHE_DIR}/filesystem-scan.json" ]; then
+            fs_vulns=$(grep -o '"Severity":"HIGH"\|"Severity":"CRITICAL"' ${SCAN_CACHE_DIR}/filesystem-scan.json | wc -l 2>/dev/null || echo "0")
+            echo "Filesystem vulnerabilities (HIGH/CRITICAL): $fs_vulns" >> ${SCAN_CACHE_DIR}/scan-summary.txt
+          fi
+          
+          if [ -f "${SCAN_CACHE_DIR}/container-scan.json" ]; then
+            container_vulns=$(grep -o '"Severity":"HIGH"\|"Severity":"CRITICAL"' ${SCAN_CACHE_DIR}/container-scan.json | wc -l 2>/dev/null || echo "0")
+            echo "Container vulnerabilities (HIGH/CRITICAL): $container_vulns" >> ${SCAN_CACHE_DIR}/scan-summary.txt
+          fi
+          
+          echo "✅ Security scans completed and stored in: ${SCAN_CACHE_DIR}"
+          echo "Scan summary:"
+          cat ${SCAN_CACHE_DIR}/scan-summary.txt
+          
+          # Store cache location for potential future use
+          echo "SCAN_CACHE_DIR=${SCAN_CACHE_DIR}" >> $GITHUB_ENV
+        timeout-minutes: 25
+          
+      - name: Cleanup scan image
+        if: always()
+        run: |
+          docker rmi ${{ env.APP_NAME }}:scan-${{ github.run_id }} || true
+
+  deploy:
+    name: Deploy Application with Monitoring
+    runs-on: self-hosted
+    needs: [test, build, security-scan]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+        
+      - name: Load JAR from cache
+        run: |
+          echo "📥 Loading JAR from local cache for deployment..."
+          BUILD_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/builds/${{ github.run_id }}"
+          
+          if [ -d "${BUILD_CACHE_DIR}" ]; then
+            cd ${{ env.APP_NAME }}
+            mkdir -p target
+            cp ${BUILD_CACHE_DIR}/*.jar target/
+            
+            # Ensure consistent naming for Docker
+            if [ ! -f target/app.jar ]; then
+              cp target/*.jar target/app.jar 2>/dev/null || echo "Warning: Could not standardize JAR name"
+            fi
+            
+            echo "✅ JAR loaded for deployment:"
+            ls -la target/
+          else
+            echo "❌ Build cache not found: ${BUILD_CACHE_DIR}"
+            exit 1
+          fi
+          
+      - name: Create monitoring configuration files
+        run: |
+          echo "⚙️ Creating monitoring configuration files..."
+          
+          # Create Prometheus config
+          mkdir -p monitoring/prometheus/rules
+          cat > monitoring/prometheus/prometheus.yml << 'EOF'
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+          
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+          
+            - job_name: 'bookstore-app'
+              metrics_path: '/actuator/prometheus'
+              scrape_interval: 10s
+              static_configs:
+                - targets: ['app:8080']
+              scrape_timeout: 10s
+          
+            - job_name: 'node-exporter'
+              static_configs:
+                - targets: ['node-exporter:9100']
+          
+            - job_name: 'cadvisor'
+              static_configs:
+                - targets: ['cadvisor:8080']
+          EOF
+          
+          # Create Grafana datasource config
+          mkdir -p monitoring/grafana/provisioning/datasources
+          cat > monitoring/grafana/provisioning/datasources/prometheus.yml << 'EOF'
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: true
+              jsonData:
+                timeInterval: "5s"
+          EOF
+          
+          # Create Grafana dashboard provisioning config
+          mkdir -p monitoring/grafana/provisioning/dashboards
+          cat > monitoring/grafana/provisioning/dashboards/dashboards.yml << 'EOF'
+          apiVersion: 1
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+          EOF
+          
+          # Create basic dashboard for Spring Boot app
+          mkdir -p monitoring/grafana/dashboards
+          cat > monitoring/grafana/dashboards/spring-boot-dashboard.json << 'EOF'
+          {
+            "dashboard": {
+              "id": null,
+              "title": "Bookstore Application Monitoring",
+              "tags": ["spring-boot", "bookstore"],
+              "timezone": "",
+              "panels": [
+                {
+                  "id": 1,
+                  "title": "Application Health",
+                  "type": "stat",
+                  "targets": [
+                    {
+                      "expr": "up{job=\"bookstore-app\"}",
+                      "legendFormat": "App Status"
+                    }
+                  ],
+                  "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+                },
+                {
+                  "id": 2,
+                  "title": "HTTP Request Rate",
+                  "type": "graph",
+                  "targets": [
+                    {
+                      "expr": "rate(http_server_requests_seconds_count{job=\"bookstore-app\"}[5m])",
+                      "legendFormat": "{{method}} {{uri}}"
+                    }
+                  ],
+                  "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0}
+                }
+              ],
+              "time": {"from": "now-15m", "to": "now"},
+              "refresh": "5s"
+            }
+          }
+          EOF
+          
+          echo "✅ Monitoring configuration created"
+          
+      - name: Deploy with Docker Compose
+        run: |
+          echo "🚀 Deploying application with monitoring stack..."
+          
+          # Check Docker and Docker Compose
+          docker --version
+          docker-compose --version || docker compose version
+          
+          # Stop existing containers
+          echo "Stopping existing containers..."
+          docker-compose down --remove-orphans || true
+          
+          # Clean up old volumes
+          echo "Cleaning up old volumes..."
+          docker volume rm bookstore-ci-cd_db_data 2>/dev/null || true
+          docker volume rm bookstore-ci-cd_prometheus_data 2>/dev/null || true
+          docker volume rm bookstore-ci-cd_grafana_data 2>/dev/null || true
+          docker system prune -f || true
+          
+          # Build and start all services
+          echo "Building and starting all containers..."
+          docker-compose up -d --build --force-recreate
+        timeout-minutes: 15
+          
+      - name: Verify deployment
+        run: |
+          echo "🔍 Verifying deployment..."
+          
+          timeout=120
+          counter=0
+          
+          while [ $counter -lt $timeout ]; do
+            if docker-compose ps | grep -q "Up"; then
+              echo "Containers are running, checking service health..."
+              sleep 10
+              
+              app_healthy=false
+              prometheus_healthy=false
+              grafana_healthy=false
+              
+              # Check services
+              if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
+                echo "✅ Application is responding!"
+                app_healthy=true
+              fi
+              
+              if curl -f http://localhost:${{ env.PROMETHEUS_PORT }}/-/healthy 2>/dev/null; then
+                echo "✅ Prometheus is responding!"
+                prometheus_healthy=true
+              fi
+              
+              if curl -f http://localhost:${{ env.GRAFANA_PORT }}/api/health 2>/dev/null; then
+                echo "✅ Grafana is responding!"
+                grafana_healthy=true
+              fi
+              
+              if [ "$app_healthy" = true ] && [ "$prometheus_healthy" = true ] && [ "$grafana_healthy" = true ]; then
+                echo "🎉 All services are healthy!"
+                break
+              fi
+            fi
+            
+            echo "Waiting... ($counter/$timeout)"
+            sleep 5
+            counter=$((counter + 5))
+          done
+          
+          # Display service URLs and status
+          echo ""
+          echo "🌐 Service URLs:"
+          echo "   📱 Bookstore Application: http://localhost:${{ env.DEPLOY_PORT }}"
+          echo "   📊 Prometheus: http://localhost:${{ env.PROMETHEUS_PORT }}"
+          echo "   📈 Grafana: http://localhost:${{ env.GRAFANA_PORT }} (admin/admin123)"
+          echo ""
+          echo "📋 Monitoring Endpoints:"
+          echo "   🏥 App Health: http://localhost:${{ env.DEPLOY_PORT }}/actuator/health"
+          echo "   📊 App Metrics: http://localhost:${{ env.DEPLOY_PORT }}/actuator/prometheus"
+          echo "   🎯 Prometheus Targets: http://localhost:${{ env.PROMETHEUS_PORT }}/targets"
+          echo ""
+          echo "Container Status:"
+          docker-compose ps
+
+  # Generate deployment report
+  report:
+    name: Generate Deployment Report
+    runs-on: self-hosted
+    needs: deploy
+    if: always() && github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Generate comprehensive report
+        run: |
+          echo "📋 Generating deployment report..."
+          
+          REPORT_DIR="${{ env.BUILD_CACHE_DIR }}/reports/${{ github.run_id }}"
+          mkdir -p ${REPORT_DIR}
+          
+          # Create comprehensive report
+          cat > ${REPORT_DIR}/deployment-report.md << EOF
+          # Deployment Report
+          
+          **Build ID:** ${{ github.run_id }}  
+          **Timestamp:** $(date)  
+          **Branch:** ${{ github.ref_name }}  
+          **Commit:** ${{ github.sha }}  
+          **Workflow:** ${{ github.workflow }}  
+          
+          ## 🏗️ Build Results
+          
+          EOF
+          
+          # Add test results if available
+          TEST_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/tests/${{ github.run_id }}"
+          if [ -f "${TEST_CACHE_DIR}/test-summary.txt" ]; then
+            echo "### ✅ Test Results" >> ${REPORT_DIR}/deployment-report.md
+            echo '```' >> ${REPORT_DIR}/deployment-report.md
+            cat ${TEST_CACHE_DIR}/test-summary.txt >> ${REPORT_DIR}/deployment-report.md
+            echo '```' >> ${REPORT_DIR}/deployment-report.md
+            echo "" >> ${REPORT_DIR}/deployment-report.md
+          fi
+          
+          # Add build info if available
+          BUILD_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/builds/${{ github.run_id }}"
+          if [ -f "${BUILD_CACHE_DIR}/build-info.txt" ]; then
+            echo "### 📦 Build Information" >> ${REPORT_DIR}/deployment-report.md
+            echo '```' >> ${REPORT_DIR}/deployment-report.md
+            cat ${BUILD_CACHE_DIR}/build-info.txt >> ${REPORT_DIR}/deployment-report.md
+            echo '```' >> ${REPORT_DIR}/deployment-report.md
+            echo "" >> ${REPORT_DIR}/deployment-report.md
+          fi
+          
+          # Add security scan results if available
+          SCAN_CACHE_DIR="${{ env.BUILD_CACHE_DIR }}/scans/${{ github.run_id }}"
+          if [ -f "${SCAN_CACHE_DIR}/scan-summary.txt" ]; then
+            echo "### 🔒 Security Scan Results" >> ${REPORT_DIR}/deployment-report.md
+            echo '```' >> ${REPORT_DIR}/deployment-report.md
+            cat ${SCAN_CACHE_DIR}/scan-summary.txt >> ${REPORT_DIR}/deployment-report.md
+            echo '```' >> ${REPORT_DIR}/deployment-report.md
+            echo "" >> ${REPORT_DIR}/deployment-report.md
+          fi
+          
+          # Add deployment status
+          echo "### 🚀 Deployment Status" >> ${REPORT_DIR}/deployment-report.md
+          echo "" >> ${REPORT_DIR}/deployment-report.md
+          if docker-compose ps 2>/dev/null | grep -q "Up"; then
+            echo "✅ **Status:** Deployment Successful" >> ${REPORT_DIR}/deployment-report.md
+            echo "" >> ${REPORT_DIR}/deployment-report.md
+            echo "**Service URLs:**" >> ${REPORT_DIR}/deployment-report.md
+            echo "- 📱 Application: http://localhost:${{ env.DEPLOY_PORT }}" >> ${REPORT_DIR}/deployment-report.md
+            echo "- 📊 Prometheus: http://localhost:${{ env.PROMETHEUS_PORT }}" >> ${REPORT_DIR}/deployment-report.md
+            echo "- 📈 Grafana: http://localhost:${{ env.GRAFANA_PORT }}" >> ${REPORT_DIR}/deployment-report.md
+          else
+            echo "❌ **Status:** Deployment Failed or Services Not Running" >> ${REPORT_DIR}/deployment-report.md
+          fi
+          
+          echo "" >> ${REPORT_DIR}/deployment-report.md
+          echo "---" >> ${REPORT_DIR}/deployment-report.md
+          echo "*Report generated on $(date)*" >> ${REPORT_DIR}/deployment-report.md
+          
+          echo "✅ Report generated: ${REPORT_DIR}/deployment-report.md"
+          echo ""
+          echo "📋 Full Report:"
+          cat ${REPORT_DIR}/deployment-report.md
+          
+          # Also create a simple text summary for console output
+          echo "=== DEPLOYMENT SUMMARY ===" > ${REPORT_DIR}/summary.txt
+          echo "Build ID: ${{ github.run_id }}" >> ${REPORT_DIR}/summary.txt
+          echo "Status: $(docker-compose ps 2>/dev/null | grep -q 'Up' && echo 'SUCCESS' || echo 'FAILED')" >> ${REPORT_DIR}/summary.txt
+          echo "Timestamp: $(date)" >> ${REPORT_DIR}/summary.txt
+          
+  # Final cleanup
+  cleanup:
+    name: Final Cleanup
+    runs-on: self-hosted
+    needs: [deploy, report]
+    if: always()
+    
+    steps:
+      - name: Cleanup workspace
+        run: |
+          echo "🧹 Final cleanup..."
+          
+          # Clean up workspace but keep cache and running services
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            rm -rf ${GITHUB_WORKSPACE}/.git 2>/dev/null || true
+            rm -rf ${GITHUB_WORKSPACE}/target 2>/dev/null || true
+          fi
+          
+          # Clean up temporary containers (keep running services)
+          docker container prune -f || true
+          docker image prune -f || true
+          
+          echo "✅ Cleanup completed"
+          echo "🗃️ Build artifacts stored in: ${{ env.BUILD_CACHE_DIR }}"
+          echo "🚀 Services remain running for the deployment"
+        continue-on-error: true
