@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App (Improved)
+name: Build, Test, and Deploy Bookstore App with Monitoring
 
 on:
   push:
@@ -15,6 +15,8 @@ env:
   JAVA_DISTRIBUTION: 'temurin'
   APP_NAME: 'bookstore'
   DEPLOY_PORT: '8080'
+  PROMETHEUS_PORT: '9090'
+  GRAFANA_PORT: '3000'
 
 jobs:
   # Add a cleanup job to run first
@@ -209,11 +211,46 @@ jobs:
         if: always()
         run: |
           docker rmi ${{ env.APP_NAME }}:scan-${{ github.run_id }} || true
-          
-  deploy:
-    name: Deploy Application
+
+  setup-monitoring:
+    name: Setup Monitoring Configuration
     runs-on: self-hosted
     needs: [test, build, security-scan]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          clean: true
+        
+      - name: Create monitoring directories
+        run: |
+          echo "Creating monitoring configuration directories..."
+          mkdir -p monitoring/prometheus/rules
+          mkdir -p monitoring/grafana/provisioning/datasources
+          mkdir -p monitoring/grafana/provisioning/dashboards
+          mkdir -p monitoring/grafana/dashboards
+          
+      - name: Setup Prometheus configuration
+        run: |
+          echo "Setting up Prometheus configuration..."
+          # This will be created from the artifacts above
+          ls -la monitoring/ || echo "Monitoring directory structure:"
+          find monitoring/ -type f || echo "No monitoring files found yet"
+          
+      - name: Verify monitoring setup
+        run: |
+          echo "=== Monitoring Setup Verification ==="
+          echo "Directories created:"
+          find monitoring/ -type d
+          echo "Ready for deployment with monitoring stack"
+
+  deploy:
+    name: Deploy Application with Monitoring
+    runs-on: self-hosted
+    needs: [test, build, security-scan, setup-monitoring]
     if: github.ref == 'refs/heads/main'
     
     steps:
@@ -235,6 +272,110 @@ jobs:
           echo "=== Downloaded artifacts ==="
           ls -la target/
           
+      - name: Create monitoring configuration files
+        run: |
+          echo "Creating monitoring configuration files..."
+          
+          # Create Prometheus config
+          mkdir -p monitoring/prometheus/rules
+          cat > monitoring/prometheus/prometheus.yml << 'EOF'
+          global:
+            scrape_interval: 15s
+            evaluation_interval: 15s
+          
+          scrape_configs:
+            - job_name: 'prometheus'
+              static_configs:
+                - targets: ['localhost:9090']
+          
+            - job_name: 'bookstore-app'
+              metrics_path: '/actuator/prometheus'
+              scrape_interval: 10s
+              static_configs:
+                - targets: ['app:8080']
+              scrape_timeout: 10s
+          
+            - job_name: 'node-exporter'
+              static_configs:
+                - targets: ['node-exporter:9100']
+          
+            - job_name: 'cadvisor'
+              static_configs:
+                - targets: ['cadvisor:8080']
+          EOF
+          
+          # Create Grafana datasource config
+          mkdir -p monitoring/grafana/provisioning/datasources
+          cat > monitoring/grafana/provisioning/datasources/prometheus.yml << 'EOF'
+          apiVersion: 1
+          datasources:
+            - name: Prometheus
+              type: prometheus
+              access: proxy
+              url: http://prometheus:9090
+              isDefault: true
+              editable: true
+              jsonData:
+                timeInterval: "5s"
+          EOF
+          
+          # Create Grafana dashboard provisioning config
+          mkdir -p monitoring/grafana/provisioning/dashboards
+          cat > monitoring/grafana/provisioning/dashboards/dashboards.yml << 'EOF'
+          apiVersion: 1
+          providers:
+            - name: 'default'
+              orgId: 1
+              folder: ''
+              type: file
+              disableDeletion: false
+              updateIntervalSeconds: 10
+              allowUiUpdates: true
+              options:
+                path: /var/lib/grafana/dashboards
+          EOF
+          
+          # Create basic dashboard for Spring Boot app
+          mkdir -p monitoring/grafana/dashboards
+          cat > monitoring/grafana/dashboards/spring-boot-dashboard.json << 'EOF'
+          {
+            "dashboard": {
+              "id": null,
+              "title": "Bookstore Application Monitoring",
+              "tags": ["spring-boot", "bookstore"],
+              "timezone": "",
+              "panels": [
+                {
+                  "id": 1,
+                  "title": "Application Health",
+                  "type": "stat",
+                  "targets": [
+                    {
+                      "expr": "up{job=\"bookstore-app\"}",
+                      "legendFormat": "App Status"
+                    }
+                  ],
+                  "gridPos": {"h": 8, "w": 6, "x": 0, "y": 0}
+                },
+                {
+                  "id": 2,
+                  "title": "HTTP Request Rate",
+                  "type": "graph",
+                  "targets": [
+                    {
+                      "expr": "rate(http_server_requests_seconds_count{job=\"bookstore-app\"}[5m])",
+                      "legendFormat": "{{method}} {{uri}}"
+                    }
+                  ],
+                  "gridPos": {"h": 8, "w": 18, "x": 6, "y": 0}
+                }
+              ],
+              "time": {"from": "now-15m", "to": "now"},
+              "refresh": "5s"
+            }
+          }
+          EOF
+          
       - name: Check Docker and Docker Compose
         run: |
           echo "=== Docker version ==="
@@ -248,80 +389,219 @@ jobs:
           docker-compose down --remove-orphans || true
         timeout-minutes: 5
           
-      - name: Clean up database volume
+      - name: Clean up volumes
         run: |
-          echo "Cleaning up old database volume..."
+          echo "Cleaning up old volumes..."
           docker volume rm bookstore-ci-cd_db_data || true
+          docker volume rm bookstore-ci-cd_prometheus_data || true
+          docker volume rm bookstore-ci-cd_grafana_data || true
           docker system prune -f || true
           
       - name: Build and deploy with Docker Compose
         run: |
-          echo "Building and starting containers..."
+          echo "Building and starting all containers including monitoring stack..."
           docker-compose up -d --build --force-recreate
-        timeout-minutes: 10
+        timeout-minutes: 15
           
-      - name: Wait for application to start
+      - name: Wait for services to start
         run: |
-          echo "Waiting for application to start..."
+          echo "Waiting for all services to start..."
           
-          timeout=60
+          timeout=120
           counter=0
           
           while [ $counter -lt $timeout ]; do
+            # Check if containers are running
             if docker-compose ps | grep -q "Up"; then
-              echo "Containers are running, checking application health..."
-              sleep 5
+              echo "Containers are running, checking service health..."
+              sleep 10
               
-              if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null || curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
+              # Check application health
+              app_healthy=false
+              prometheus_healthy=false
+              grafana_healthy=false
+              
+              # Check Spring Boot app
+              if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
                 echo "✅ Application is responding!"
+                app_healthy=true
+              fi
+              
+              # Check Prometheus
+              if curl -f http://localhost:${{ env.PROMETHEUS_PORT }}/-/healthy 2>/dev/null; then
+                echo "✅ Prometheus is responding!"
+                prometheus_healthy=true
+              fi
+              
+              # Check Grafana
+              if curl -f http://localhost:${{ env.GRAFANA_PORT }}/api/health 2>/dev/null; then
+                echo "✅ Grafana is responding!"
+                grafana_healthy=true
+              fi
+              
+              if [ "$app_healthy" = true ] && [ "$prometheus_healthy" = true ] && [ "$grafana_healthy" = true ]; then
+                echo "🎉 All services are healthy!"
                 break
               fi
             fi
             
             echo "Waiting... ($counter/$timeout)"
-            sleep 2
-            counter=$((counter + 2))
+            sleep 5
+            counter=$((counter + 5))
           done
           
           if [ $counter -ge $timeout ]; then
-            echo "⚠️ Application may not be fully ready yet"
-          fi
-          
-      - name: Final health check
-        run: |
-          echo "=== Final Health Check ==="
-          
-          if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
-            echo "✅ Health endpoint responding"
-          elif curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
-            echo "✅ Application endpoint responding"
-          else
-            echo "⚠️ Application may not be responding on port ${{ env.DEPLOY_PORT }}"
+            echo "⚠️ Some services may not be fully ready yet"
             echo "Container status:"
             docker-compose ps
           fi
           
-          echo ""
-          echo "🌐 Application should be available at:"
-          echo "   - http://localhost:${{ env.DEPLOY_PORT }}"
+      - name: Verify monitoring metrics
+        run: |
+          echo "=== Verifying Monitoring Setup ==="
           
+          # Wait a bit more for metrics to be available
+          sleep 15
+          
+          # Check if Prometheus can scrape the application
+          echo "Checking Prometheus targets..."
+          if curl -s http://localhost:${{ env.PROMETHEUS_PORT }}/api/v1/targets | grep -q "bookstore-app"; then
+            echo "✅ Prometheus is scraping bookstore application"
+          else
+            echo "⚠️ Prometheus may not be scraping bookstore application yet"
+          fi
+          
+          # Check if application metrics are available
+          echo "Checking application metrics endpoint..."
+          if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/prometheus 2>/dev/null | head -10; then
+            echo "✅ Application metrics endpoint is working"
+          else
+            echo "⚠️ Application metrics endpoint may not be ready"
+          fi
+          
+      - name: Final health check and service URLs
+        run: |
+          echo "=== Final Health Check ==="
+          
+          # Application health check
+          if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
+            echo "✅ Application health endpoint responding"
+          else
+            echo "⚠️ Application health endpoint not responding"
+          fi
+          
+          # Prometheus health check
+          if curl -f http://localhost:${{ env.PROMETHEUS_PORT }}/-/healthy 2>/dev/null; then
+            echo "✅ Prometheus health endpoint responding"
+          else
+            echo "⚠️ Prometheus health endpoint not responding"
+          fi
+          
+          # Grafana health check
+          if curl -f http://localhost:${{ env.GRAFANA_PORT }}/api/health 2>/dev/null; then
+            echo "✅ Grafana health endpoint responding"
+          else
+            echo "⚠️ Grafana health endpoint not responding"
+          fi
+          
+          echo ""
+          echo "🌐 Service URLs:"
+          echo "   📱 Bookstore Application: http://localhost:${{ env.DEPLOY_PORT }}"
+          echo "   📊 Prometheus: http://localhost:${{ env.PROMETHEUS_PORT }}"
+          echo "   📈 Grafana: http://localhost:${{ env.GRAFANA_PORT }} (admin/admin123)"
+          echo "   🔍 SonarQube: http://localhost:9000"
+          echo ""
+          echo "📋 Monitoring Endpoints:"
+          echo "   🏥 App Health: http://localhost:${{ env.DEPLOY_PORT }}/actuator/health"
+          echo "   📊 App Metrics: http://localhost:${{ env.DEPLOY_PORT }}/actuator/prometheus"
+          echo "   🎯 Prometheus Targets: http://localhost:${{ env.PROMETHEUS_PORT }}/targets"
+          
+          echo ""
+          echo "Container Status:"
+          docker-compose ps
+
+  # Monitoring validation job
+  validate-monitoring:
+    name: Validate Monitoring Stack
+    runs-on: self-hosted
+    needs: deploy
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Wait for monitoring stack stabilization
+        run: |
+          echo "Waiting for monitoring stack to stabilize..."
+          sleep 30
+          
+      - name: Validate Prometheus configuration
+        run: |
+          echo "=== Validating Prometheus Configuration ==="
+          
+          # Check Prometheus config
+          if curl -s http://localhost:${{ env.PROMETHEUS_PORT }}/api/v1/status/config | grep -q "bookstore-app"; then
+            echo "✅ Prometheus configuration includes bookstore-app target"
+          else
+            echo "❌ Prometheus configuration missing bookstore-app target"
+          fi
+          
+          # Check active targets
+          active_targets=$(curl -s http://localhost:${{ env.PROMETHEUS_PORT }}/api/v1/targets | grep -o '"health":"up"' | wc -l)
+          echo "📊 Active Prometheus targets: $active_targets"
+          
+      - name: Validate metrics collection
+        run: |
+          echo "=== Validating Metrics Collection ==="
+          
+          # Generate some traffic to create metrics
+          echo "Generating sample traffic..."
+          for i in {1..5}; do
+            curl -s http://localhost:${{ env.DEPLOY_PORT }}/ > /dev/null || true
+            curl -s http://localhost:${{ env.DEPLOY_PORT }}/actuator/health > /dev/null || true
+            sleep 2
+          done
+          
+          sleep 10
+          
+          # Check if metrics are being collected
+          if curl -s "http://localhost:${{ env.PROMETHEUS_PORT }}/api/v1/query?query=up{job=\"bookstore-app\"}" | grep -q '"value":\[.*,"1"\]'; then
+            echo "✅ Application metrics are being collected"
+          else
+            echo "⚠️ Application metrics may not be collected yet"
+          fi
+          
+      - name: Test Grafana dashboard access
+        run: |
+          echo "=== Testing Grafana Dashboard Access ==="
+          
+          # Test Grafana API
+          if curl -s -u admin:admin123 http://localhost:${{ env.GRAFANA_PORT }}/api/datasources | grep -q "Prometheus"; then
+            echo "✅ Grafana can access Prometheus datasource"
+          else
+            echo "⚠️ Grafana may not have Prometheus datasource configured"
+          fi
+          
+          # List available dashboards
+          dashboard_count=$(curl -s -u admin:admin123 http://localhost:${{ env.GRAFANA_PORT }}/api/search | grep -o '"title"' | wc -l)
+          echo "📊 Available Grafana dashboards: $dashboard_count"
+
   # Final cleanup job
   final-cleanup:
     name: Final Cleanup
     runs-on: self-hosted
-    needs: [deploy]
+    needs: [deploy, validate-monitoring]
     if: always()
     
     steps:
-      - name: Cleanup artifacts and containers
+      - name: Cleanup artifacts and temporary containers
         run: |
           echo "Final cleanup..."
-          # Clean up any remaining containers
+          # Clean up any temporary containers (keep the running services)
           docker container prune -f || true
           docker image prune -f || true
           
-          # Clean up workspace
+          # Clean up workspace but keep monitoring configs
           rm -rf ${GITHUB_WORKSPACE}/.git || true
           
-          echo "Final cleanup completed"
+          echo "✅ Final cleanup completed"
+          echo "🚀 Deployment with monitoring stack is complete!"
         continue-on-error: true
