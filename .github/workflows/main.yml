@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App with Monitoring .
+name: Build, Test, and Deploy Bookstore App with Monitoring
 
 on:
   push:
@@ -109,25 +109,40 @@ jobs:
           ./mvnw clean test jacoco:report --batch-mode --no-transfer-progress
         timeout-minutes: 15  # Add timeout to prevent hanging
           
-      - name: Generate test report
+      - name: Generate test report summary
         if: always()
         run: |
           cd ${{ env.APP_NAME }}
-          echo "=== Test Results ==="
+          echo "=== Test Results Summary ==="
           if [ -d "target/surefire-reports" ]; then
-            find target/surefire-reports -name "*.xml" -exec grep -l "testcase" {} \; | wc -l | xargs echo "Test files found:"
-            echo "Coverage report: target/site/jacoco/index.html"
+            test_files=$(find target/surefire-reports -name "*.xml" -exec grep -l "testcase" {} \; | wc -l)
+            echo "Test files found: $test_files"
+            
+            # Create a summary instead of uploading all files
+            echo "Creating test summary..."
+            mkdir -p test-summary
+            
+            # Extract key metrics
+            if [ -f "target/site/jacoco/index.html" ]; then
+              grep -o "Total.*[0-9]\+%" target/site/jacoco/index.html > test-summary/coverage-summary.txt || echo "Coverage: Available in target/site/jacoco/" > test-summary/coverage-summary.txt
+            fi
+            
+            # Copy only essential test results (not all XML files)
+            cp target/surefire-reports/TEST-*.txt test-summary/ 2>/dev/null || echo "No .txt test reports found"
+            
+            echo "Test summary created in test-summary/"
+            ls -la test-summary/
           fi
           
-      - name: Upload test results
+      - name: Upload test results (optimized)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: test-results-${{ github.run_id }}  # Make artifact names unique
+          name: test-results-${{ github.run_id }}
           path: |
-            ${{ env.APP_NAME }}/target/surefire-reports/
-            ${{ env.APP_NAME }}/target/site/jacoco/
+            ${{ env.APP_NAME }}/test-summary/
           retention-days: 5
+          if-no-files-found: warn
 
   build:
     name: Build Application
@@ -159,22 +174,29 @@ jobs:
           ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
         timeout-minutes: 10
           
-      - name: Verify and preserve JAR file
+      - name: Verify and optimize JAR file
         run: |
           cd ${{ env.APP_NAME }}
           echo "=== Built JAR files ==="
           ls -la target/*.jar
           
-          # Create a shared directory for artifacts between jobs
-          mkdir -p /tmp/github-artifacts-${{ github.run_id }}
+          # Create optimized artifact directory
+          mkdir -p optimized-jar
           
-          # Copy JAR to shared location
-          cp target/*.jar /tmp/github-artifacts-${{ github.run_id }}/
+          # Copy only the main JAR file (not sources, tests, etc.)
+          cp target/${{ env.APP_NAME }}-*.jar optimized-jar/ 2>/dev/null || cp target/*.jar optimized-jar/
           
-          echo "JAR files preserved in: /tmp/github-artifacts-${{ github.run_id }}/"
-          ls -la /tmp/github-artifacts-${{ github.run_id }}/
+          echo "=== Optimized JAR directory ==="
+          ls -la optimized-jar/
+          du -sh optimized-jar/
           
-      # Skip the upload-artifact step entirely
+      - name: Upload JAR artifact (optimized)
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
+          path: ${{ env.APP_NAME }}/optimized-jar/
+          retention-days: 5
+          compression-level: 6  # Add compression
 
   security-scan:
     name: Basic Security Scan
@@ -196,6 +218,8 @@ jobs:
       - name: Build Docker image for scanning
         run: |
           echo "Building Docker image for security scanning..."
+          # Copy JAR to expected location
+          cp ${{ env.APP_NAME }}/target/*.jar ${{ env.APP_NAME }}/target/app.jar 2>/dev/null || true
           docker build -t ${{ env.APP_NAME }}:scan-${{ github.run_id }} .
           
       - name: Install Trivy
@@ -222,25 +246,42 @@ jobs:
             ${{ env.APP_NAME }}/
         timeout-minutes: 12
           
-      - name: Run Trivy container scan
+      - name: Run Trivy container scan (optimized)
         run: |
           echo "=== Scanning Docker image ==="
+          
+          # Create optimized scan results directory
+          mkdir -p scan-results
+          
           trivy image \
             --scanners vuln \
             --severity HIGH,CRITICAL \
-            --timeout 20m \
+            --timeout 15m \
             --format json \
-            --output trivy-report-${{ github.run_id }}.json \
+            --output scan-results/trivy-report.json \
             ${{ env.APP_NAME }}:scan-${{ github.run_id }}
-        timeout-minutes: 25
+            
+          # Create summary report (smaller file)
+          trivy image \
+            --scanners vuln \
+            --severity HIGH,CRITICAL \
+            --timeout 5m \
+            --format table \
+            --output scan-results/trivy-summary.txt \
+            ${{ env.APP_NAME }}:scan-${{ github.run_id }}
+            
+          echo "Scan results size:"
+          du -sh scan-results/
+        timeout-minutes: 20
           
-      - name: Upload Trivy scan results
+      - name: Upload Trivy scan results (optimized)
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: trivy-scan-results-${{ github.run_id }}
-          path: trivy-report-${{ github.run_id }}.json
+          path: scan-results/
           retention-days: 5
+          compression-level: 9  # Maximum compression for scan results
           
       - name: Cleanup scan image
         if: always()
@@ -273,7 +314,7 @@ jobs:
           echo "Setting up Prometheus configuration..."
           # This will be created from the artifacts above
           ls -la monitoring/ || echo "Monitoring directory structure:"
-          find monitoring/ -type f || echo "No monitoring files found yet"
+          find monitoring/ -type d || echo "No monitoring directories found yet"
           
       - name: Verify monitoring setup
         run: |
@@ -306,6 +347,11 @@ jobs:
           cd ${{ env.APP_NAME }}
           echo "=== Downloaded artifacts ==="
           ls -la target/
+          
+          # Ensure JAR is in the right place for Docker build
+          if [ ! -f target/app.jar ]; then
+            cp target/*.jar target/app.jar 2>/dev/null || echo "Warning: Could not find JAR file"
+          fi
           
       - name: Create monitoring configuration files
         run: |
