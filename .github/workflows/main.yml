@@ -159,18 +159,22 @@ jobs:
           ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
         timeout-minutes: 10
           
-      - name: Verify JAR file
+      - name: Verify and preserve JAR file
         run: |
           cd ${{ env.APP_NAME }}
           echo "=== Built JAR files ==="
           ls -la target/*.jar
           
-      - name: Upload JAR artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: ${{ env.APP_NAME }}-jar-${{ github.run_id }}
-          path: ${{ env.APP_NAME }}/target/*.jar
-          retention-days: 5
+          # Create a shared directory for artifacts between jobs
+          mkdir -p /tmp/github-artifacts-${{ github.run_id }}
+          
+          # Copy JAR to shared location
+          cp target/*.jar /tmp/github-artifacts-${{ github.run_id }}/
+          
+          echo "JAR files preserved in: /tmp/github-artifacts-${{ github.run_id }}/"
+          ls -la /tmp/github-artifacts-${{ github.run_id }}/
+          
+      # Skip the upload-artifact step entirely
 
   security-scan:
     name: Basic Security Scan
