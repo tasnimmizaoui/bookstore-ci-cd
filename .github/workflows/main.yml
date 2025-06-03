@@ -1,4 +1,4 @@
-name: Build, Test, and Deploy Bookstore App with Monitoring
+name: Build, Test, and Deploy Bookstore App with Monitoring .
 
 on:
   push:
