@@ -28,18 +28,49 @@ jobs:
       - name: Cleanup workspace
         run: |
           echo "Cleaning up workspace..."
-          # Clean up any existing processes
-          pkill -f maven || true
-          pkill -f java || true
+          echo "Current user: $(whoami)"
+          echo "User groups: $(groups)"
           
-          # Clean up workspace
-          rm -rf ${GITHUB_WORKSPACE}/* || true
+          # Clean up any existing processes (more graceful)
+          echo "Stopping Java processes..."
+          pkill -f maven 2>/dev/null || echo "No maven processes found"
+          pkill -f java 2>/dev/null || echo "No java processes found"
           
-          # Clean up docker containers if any
-          docker container prune -f || true
-          docker image prune -f || true
+          # Wait a moment for processes to stop
+          sleep 2
           
-          echo "Cleanup completed"
+          # Clean up workspace files
+          echo "Cleaning workspace files..."
+          if [ -d "${GITHUB_WORKSPACE}" ]; then
+            # Remove contents but preserve the directory structure
+            find ${GITHUB_WORKSPACE} -mindepth 1 -delete 2>/dev/null || {
+              echo "Cleaning accessible files only..."
+              find ${GITHUB_WORKSPACE} -type f -user $(whoami) -delete 2>/dev/null || true
+              find ${GITHUB_WORKSPACE} -type d -empty -user $(whoami) -delete 2>/dev/null || true
+            }
+          fi
+          
+          # Clean up docker containers if docker is accessible
+          echo "Cleaning up Docker resources..."
+          if command -v docker &> /dev/null; then
+            if docker info &> /dev/null; then
+              echo "Docker is accessible, cleaning up..."
+              docker container prune -f 2>/dev/null || echo "Docker container cleanup skipped"
+              docker image prune -f 2>/dev/null || echo "Docker image cleanup skipped"
+              docker network prune -f 2>/dev/null || echo "Docker network cleanup skipped"
+              docker volume prune -f 2>/dev/null || echo "Docker volume cleanup skipped"
+            else
+              echo "Docker daemon not accessible or not running"
+            fi
+          else
+            echo "Docker command not found"
+          fi
+          
+          # Clean up any leftover artifacts
+          echo "Cleaning up artifacts..."
+          rm -rf /tmp/github-actions-* 2>/dev/null || true
+          
+          echo "✅ Cleanup completed successfully"
         continue-on-error: true
 
   test:
