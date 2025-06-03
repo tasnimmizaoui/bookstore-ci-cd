@@ -1,0 +1,91 @@
+name: Simple Bookstore Deploy
+
+on:
+  push:
+    branches:
+      - test
+
+
+env:
+  JAVA_VERSION: '17'
+  JAVA_DISTRIBUTION: 'temurin'
+  APP_NAME: 'bookstore'
+  DEPLOY_PORT: '8080'
+
+jobs:
+  deploy:
+    name: Build and Deploy Bookstore
+    runs-on: self-hosted
+    
+    steps:
+      - name: Cleanup workspace
+        run: |
+          echo "🧹 Cleaning up workspace..."
+          pkill -f maven || true
+          pkill -f java || true
+          rm -rf ${GITHUB_WORKSPACE}/* || true
+          docker-compose down --remove-orphans || true
+          docker container prune -f || true
+        continue-on-error: true
+
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          clean: true
+
+      - name: Set up JDK ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: ${{ env.JAVA_DISTRIBUTION }}
+
+      - name: Build application
+        run: |
+          echo "🔨 Building application..."
+          cd ${{ env.APP_NAME }}
+          chmod +x ./mvnw
+          ./mvnw clean package -DskipTests --batch-mode --no-transfer-progress
+          echo "✅ Build completed"
+          ls -la target/*.jar
+
+      - name: Stop existing deployment
+        run: |
+          echo "🛑 Stopping existing containers..."
+          docker-compose down --remove-orphans || true
+          docker volume rm bookstore-ci-cd_db_data || true
+        continue-on-error: true
+
+      - name: Deploy with Docker Compose
+        run: |
+          echo "🚀 Deploying application..."
+          docker-compose up -d --build --force-recreate
+          echo "✅ Deployment started"
+
+      - name: Wait for application
+        run: |
+          echo "⏳ Waiting for application to be ready..."
+          
+          for i in {1..30}; do
+            if curl -f http://localhost:${{ env.DEPLOY_PORT }}/actuator/health 2>/dev/null; then
+              echo "✅ Application is healthy!"
+              break
+            elif curl -f http://localhost:${{ env.DEPLOY_PORT }} 2>/dev/null; then
+              echo "✅ Application is responding!"
+              break
+            else
+              echo "Attempt $i/30 - waiting..."
+              sleep 3
+            fi
+          done
+
+      - name: Show deployment status
+        run: |
+          echo "📊 Deployment Status:"
+          echo "===================="
+          docker-compose ps
+          echo ""
+          echo "🌐 Application URL: http://localhost:${{ env.DEPLOY_PORT }}"
+          echo ""
+          echo "📋 Container logs (last 10 lines):"
+          docker-compose logs --tail=10 || true
+        continue-on-error: true
